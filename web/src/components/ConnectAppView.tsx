@@ -3,6 +3,7 @@ import {
   ExternalLink,
   FolderPlus,
   Link2,
+  Monitor,
   Pencil,
   Power,
   RefreshCw,
@@ -10,7 +11,8 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api, normalizeUrlInput, statusColorClasses } from "../api";
-import type { BootstrapPayload, ChannelConnection, PlatformDefinition } from "../types";
+import type { BootstrapPayload, ChannelConnection, LiveBrowserSession, PlatformDefinition } from "../types";
+import { LiveBrowserModal, type LiveVerifyResult } from "./LiveBrowserModal";
 import { NewChannelModal } from "./NewChannelModal";
 import { PlatformIcon } from "./PlatformIcon";
 import { ToastStack, type ToastItem, type ToastTone } from "./ToastStack";
@@ -58,6 +60,7 @@ export function ConnectAppView({
   const [newChannelOpen, setNewChannelOpen] = useState(false);
   const [editingConnId, setEditingConnId] = useState<string | null>(null);
   const [handleDraft, setHandleDraft] = useState("");
+  const [liveSession, setLiveSession] = useState<LiveBrowserSession | null>(null);
 
   const pollTimersRef = useRef<number[]>([]);
   const toastTimersRef = useRef<Map<string, number>>(new Map());
@@ -146,9 +149,15 @@ export function ConnectAppView({
         oauthUrl?: string;
         command?: string;
         url: string;
+        session?: LiveBrowserSession;
       }>(`/api/channels/${selectedChannel.id}/connect`, { platform, customUrl: explicitUrl });
       if (res.oauthUrl) {
         window.location.href = res.oauthUrl;
+        return;
+      }
+      if (res.mode === "live_browser" && res.session) {
+        setLiveSession(res.session);
+        await onRefresh();
         return;
       }
       await onRefresh();
@@ -235,6 +244,32 @@ export function ConnectAppView({
     }
   }
 
+  async function handleLiveBrowserClosed(outcome?: { verified: boolean; results?: LiveVerifyResult[] }) {
+    setLiveSession(null);
+    await onRefresh();
+    if (!outcome?.verified) {
+      pushToast("info", "Closed container Live Browser.");
+      return;
+    }
+    const list = outcome.results ?? [];
+    if (list.length === 1) {
+      const item = list[0];
+      const ok = item.status === "signed_in";
+      const label = platformById.get(item.platform)?.name ?? item.platform;
+      pushToast(
+        ok ? "success" : "warning",
+        ok
+          ? `${label} verified: SIGNED IN${item.observedHandle ? ` as ${item.observedHandle}` : ""}.`
+          : `${label} status: ${item.status.replace(/_/g, " ").toUpperCase()}${item.note ? ` (${item.note})` : ""}.`,
+      );
+    } else if (list.length > 1) {
+      const signedIn = list.filter(x => x.status === "signed_in").length;
+      pushToast(signedIn === list.length ? "success" : "warning", `Verified ${signedIn}/${list.length} sessions.`);
+    } else {
+      pushToast("success", "Saved container Live Browser profile.");
+    }
+  }
+
   return (
     <div className="min-h-screen bg-[var(--bg-canvas)] text-[var(--text-primary)] pb-6">
       {/* Sticky Carbon Bento Top Bar */}
@@ -287,6 +322,26 @@ export function ConnectAppView({
       <ToastStack toasts={toasts} onDismiss={dismissToast} />
 
       <div className="mx-auto mt-4 max-w-4xl space-y-4 px-4 sm:px-6">
+        {data.liveBrowser?.session?.active && !liveSession && (
+          <div className="vsp-card flex flex-wrap items-center justify-between gap-3 border border-emerald-500/35 bg-emerald-500/8 px-4 py-3 text-xs">
+            <div className="flex items-center gap-2.5">
+              <Monitor className="h-4 w-4 text-emerald-400" />
+              <span>
+                <strong>Active Live Browser:</strong>{" "}
+                {data.liveBrowser.session.channelId}
+                {data.liveBrowser.session.platform ? ` (${data.liveBrowser.session.platform})` : ""}
+              </span>
+            </div>
+            <button
+              type="button"
+              onClick={() => setLiveSession(data.liveBrowser?.session ?? null)}
+              className="inline-flex items-center gap-1.5 rounded-xl bg-emerald-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-emerald-500"
+            >
+              <Monitor className="h-3.5 w-3.5" />
+              Resume Live Browser
+            </button>
+          </div>
+        )}
         {/* Workspace Picker + Self-Service + New Channel Button */}
         <div className="vsp-card flex flex-wrap items-center justify-between gap-3 p-4">
           <div className="flex flex-wrap items-center gap-1.5">
@@ -483,6 +538,12 @@ export function ConnectAppView({
           selectChannel(newId);
           pushToast("success", `Created workspace '${newId}' with isolated Edge profile.`);
         }}
+      />
+
+      <LiveBrowserModal
+        session={liveSession}
+        onClosed={handleLiveBrowserClosed}
+        onError={msg => pushToast("error", msg)}
       />
     </div>
   );

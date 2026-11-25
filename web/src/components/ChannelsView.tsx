@@ -1,7 +1,8 @@
-import { Check, ExternalLink, Eye, FolderPlus, Globe, Link2, Pencil, Plus, RefreshCw, Terminal, Trash2, X } from "lucide-react";
+import { Check, ExternalLink, Eye, FolderPlus, Globe, Link2, Monitor, Pencil, Plus, RefreshCw, Terminal, Trash2, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api, normalizeUrlInput, statusColorClasses } from "../api";
-import type { BootstrapPayload, ChannelConfig, ChannelConnection, PlatformDefinition } from "../types";
+import type { BootstrapPayload, ChannelConfig, ChannelConnection, LiveBrowserSession, PlatformDefinition } from "../types";
+import { LiveBrowserModal, type LiveVerifyResult } from "./LiveBrowserModal";
 import { NewChannelModal } from "./NewChannelModal";
 import { PlatformIcon } from "./PlatformIcon";
 import type { NotifyFn } from "./ToastStack";
@@ -33,6 +34,7 @@ export function ChannelsView({ data, activeChannelId = "all", onNotify, onRefres
   const [editingConnId, setEditingConnId] = useState<string | null>(null);
   const [handleDraft, setHandleDraft] = useState("");
   const [confirmDeleteChannelId, setConfirmDeleteChannelId] = useState<string | null>(null);
+  const [liveSession, setLiveSession] = useState<LiveBrowserSession | null>(null);
 
   // Custom platform modal state
   const [cpName, setCpName] = useState("");
@@ -79,12 +81,18 @@ export function ChannelsView({ data, activeChannelId = "all", onNotify, onRefres
         oauthUrl?: string;
         command?: string;
         url: string;
+        session?: LiveBrowserSession;
       }>(`/api/channels/${channelId}/connect`, {
         platform,
         customUrl,
       });
       if (res.oauthUrl) {
         window.location.href = res.oauthUrl;
+        return;
+      }
+      if (res.mode === "live_browser" && res.session) {
+        setLiveSession(res.session);
+        await onRefresh();
         return;
       }
       await onRefresh();
@@ -235,8 +243,54 @@ export function ChannelsView({ data, activeChannelId = "all", onNotify, onRefres
     }
   }
 
+  async function handleLiveBrowserClosed(outcome?: { verified: boolean; results?: LiveVerifyResult[] }) {
+    setLiveSession(null);
+    await onRefresh();
+    if (!outcome?.verified) {
+      onNotify("info", "Closed container Live Browser.");
+      return;
+    }
+    const list = outcome.results ?? [];
+    if (list.length === 1) {
+      const item = list[0];
+      const ok = item.status === "signed_in";
+      const label = platformById.get(item.platform)?.name ?? item.platform;
+      onNotify(
+        ok ? "success" : "warning",
+        ok
+          ? `${label} verified: SIGNED IN${item.observedHandle ? ` as ${item.observedHandle}` : ""}.`
+          : `${label} status: ${item.status.replace(/_/g, " ").toUpperCase()}${item.note ? ` (${item.note})` : ""}.`,
+      );
+    } else if (list.length > 1) {
+      const signedIn = list.filter(x => x.status === "signed_in").length;
+      onNotify(signedIn === list.length ? "success" : "warning", `Verified ${signedIn}/${list.length} sessions.`);
+    } else {
+      onNotify("success", "Saved container Live Browser profile.");
+    }
+  }
+
   return (
     <div className="space-y-4">
+      {data.liveBrowser?.session?.active && !liveSession && (
+        <div className="vsp-card flex flex-wrap items-center justify-between gap-3 border border-emerald-500/35 bg-emerald-500/8 px-4 py-3 text-xs">
+          <div className="flex items-center gap-2.5">
+            <Monitor className="h-4 w-4 text-emerald-400" />
+            <span>
+              <strong>Active Live Browser:</strong>{" "}
+              {data.liveBrowser.session.channelId}
+              {data.liveBrowser.session.platform ? ` (${data.liveBrowser.session.platform})` : ""} is running on the server.
+            </span>
+          </div>
+          <button
+            type="button"
+            onClick={() => setLiveSession(data.liveBrowser?.session ?? null)}
+            className="inline-flex items-center gap-1.5 rounded-xl bg-emerald-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-emerald-500"
+          >
+            <Monitor className="h-3.5 w-3.5" />
+            Resume Live Browser
+          </button>
+        </div>
+      )}
       {/* Core Social Channels Bar + Quick Icon Grid */}
       <div className="vsp-card p-5 space-y-4">
         <div className="flex flex-wrap items-center justify-between gap-3">
@@ -689,6 +743,12 @@ export function ChannelsView({ data, activeChannelId = "all", onNotify, onRefres
           <img src={lightboxShot} alt="Verification screenshot" className="max-h-[90vh] max-w-[90vw] rounded-2xl border border-[var(--border-subtle)]" />
         </div>
       )}
+
+      <LiveBrowserModal
+        session={liveSession}
+        onClosed={handleLiveBrowserClosed}
+        onError={msg => onNotify("error", msg)}
+      />
     </div>
   );
 }

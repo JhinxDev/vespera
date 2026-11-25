@@ -100,6 +100,23 @@ test("HTTP server and MCP tools manage platforms, jobs, range media streaming, a
     assert.equal(upJson.bytes, 15);
     assert.ok(upJson.sha256.length === 64);
 
+    const srtRes = await fetch(`${base}/api/media/upload?kind=captions&filename=subs.srt`, {
+      method: "POST",
+      headers: { "Content-Type": "text/plain" },
+      body: Buffer.from("1\n00:00:00,000 --> 00:00:02,000\nHello\n"),
+    });
+    assert.equal(srtRes.status, 201);
+    const srtJson = (await srtRes.json()) as { ok: boolean; bytes: number; sha256: string; filename: string };
+    assert.equal(srtJson.ok, true);
+    assert.ok(srtJson.bytes > 0);
+    assert.ok(srtJson.filename.endsWith("subs.srt"));
+
+    const lbStatus = await fetch(`${base}/api/live-browser`).then(
+      r => r.json() as Promise<{ ok: boolean; available: boolean; session: unknown }>,
+    );
+    assert.equal(lbStatus.ok, true);
+    assert.equal(typeof lbStatus.available, "boolean");
+
     const schedBefore = await fetch(`${base}/api/scheduler`).then(
       r => r.json() as Promise<{ ok: boolean; scheduler: { enabled: boolean } }>,
     );

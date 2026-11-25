@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { createReadStream, createWriteStream, existsSync, mkdirSync, readFileSync, rmSync, statSync } from "node:fs";
-import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
+import { createServer, request as httpRequest, type IncomingMessage, type Server, type ServerResponse } from "node:http";
+import { connect as netConnect } from "node:net";
 import { basename, extname, join } from "node:path";
 import {
   applyStorageStateToProfile,
@@ -19,6 +20,7 @@ import {
   isSupportedOAuthPlatform,
   verifyOAuthSession,
 } from "./oauth.js";
+import { LiveBrowserManager } from "./live-browser.js";
 import type { AdapterKind, ExistingReceipt, JobStatus, PublishingManifest, SessionCheckResult } from "./types.js";
 import type { PublishWorker } from "./worker.js";
 
@@ -195,6 +197,7 @@ export interface ServerDependencies {
 export function createVesperaServer(deps: ServerDependencies): Server {
   const { config, store, edgeAdapter, worker } = deps;
   const scheduler = deps.scheduler ?? createSchedulerManager(store, worker);
+  const liveBrowser = new LiveBrowserManager();
   const webDistDir = join(config.rootDir, "dist", "web");
   const activeConnectWatchers = new Map<string, NodeJS.Timeout>();
   const runtimeMode = process.env.VESPERA_DOCKER ? "docker" : "local";
@@ -293,6 +296,10 @@ export function createVesperaServer(deps: ServerDependencies): Server {
           version: "1.0.0",
           mode: runtimeMode,
           oauth: getOAuthProviderStatus(),
+          liveBrowser: {
+            available: liveBrowser.isAvailable(),
+            session: liveBrowser.getSession(),
+          },
           scheduler: scheduler.status(),
           summary: store.statusSummary(),
         });
@@ -306,6 +313,10 @@ export function createVesperaServer(deps: ServerDependencies): Server {
           version: "1.0.0",
           mode: runtimeMode,
           oauth: getOAuthProviderStatus(),
+          liveBrowser: {
+            available: liveBrowser.isAvailable(),
+            session: liveBrowser.getSession(),
+          },
           oauthConnections: store.listOAuthConnections(),
           scheduler: scheduler.status(),
           summary: store.statusSummary(),
@@ -554,6 +565,18 @@ export function createVesperaServer(deps: ServerDependencies): Server {
               return;
             }
           }
+          if (liveBrowser.isAvailable()) {
+            const session = await liveBrowser.start({ channel, platform: platformId, url: targetUrl });
+            sendJson(res, 200, {
+              ok: true,
+              mode: "live_browser",
+              channelId: channel.id,
+              platform: platformId,
+              url: targetUrl,
+              session,
+            });
+            return;
+          }
           const cmd = platformId
             ? `npm run sync-sessions -- ${channel.id} ${platformId}`
             : `npm run sync-sessions -- --export-only ${channel.id}`;
@@ -568,9 +591,83 @@ export function createVesperaServer(deps: ServerDependencies): Server {
           return;
         }
 
+        if (runtimeMode === "docker" && liveBrowser.isAvailable()) {
+          const session = await liveBrowser.start({ channel, platform: platformId, url: targetUrl });
+          sendJson(res, 200, {
+            ok: true,
+            mode: "live_browser",
+            channelId: channel.id,
+            platform: platformId,
+            url: targetUrl,
+            session,
+          });
+          return;
+        }
+
         const launched = await edgeAdapter.openPlatformConnect(channel, targetUrl, { waitForClose: false });
         scheduleAutoVerifyAfterClose(channel.id, platformId);
         sendJson(res, 200, { ok: true, mode: "local_browser", channelId: channel.id, platform: platformId, autoVerifyArmed: true, ...launched });
+        return;
+      }
+
+      // ---------------- On-Demand Container Live Browser ----------------
+
+      if (pathname === "/api/live-browser" && method === "GET") {
+        sendJson(res, 200, {
+          ok: true,
+          available: liveBrowser.isAvailable(),
+          session: liveBrowser.getSession(),
+        });
+        return;
+      }
+
+      if (pathname === "/api/live-browser/start" && method === "POST") {
+        const body = await readBodyJson<{ channelId?: string; platform?: string; url?: string }>(req);
+        const channelId = body.channelId?.trim() ?? "";
+        const channel = store.getChannel(channelId);
+        if (!channel) {
+          sendJson(res, 404, { ok: false, error: `Unknown channel '${channelId}'.` });
+          return;
+        }
+        const platformId = body.platform?.trim().toLowerCase() || undefined;
+        let targetUrl = body.url?.trim();
+        if (!targetUrl && platformId) {
+          const conn = channel.connections.find(c => c.platform === platformId);
+          targetUrl = conn
+            ? edgeAdapter.resolveConnectionUrls(conn).loginUrl
+            : store.getPlatformDefinition(platformId)?.loginUrl;
+        }
+        if (!targetUrl) {
+          targetUrl = "https://studio.youtube.com/";
+        }
+        const session = await liveBrowser.start({ channel, platform: platformId, url: targetUrl });
+        sendJson(res, 200, { ok: true, session });
+        return;
+      }
+
+      if (pathname === "/api/live-browser/stop" && method === "POST") {
+        const body = await readBodyJson<{ verify?: boolean }>(req);
+        const stopped = await liveBrowser.stop();
+        let results: SessionCheckResult[] | undefined;
+        if (body.verify && stopped.channelId) {
+          const ch = store.getChannel(stopped.channelId);
+          if (ch) {
+            results = await edgeAdapter.checkSessions(ch, {
+              platform: stopped.platform,
+              headless: true,
+            });
+            for (const r of results) {
+              store.saveSessionCheck(r);
+              if (r.status === "signed_in") {
+                const conn = ch.connections.find(c => c.platform === r.platform);
+                if (conn && !conn.enabled) {
+                  store.updateConnectionFields(ch.id, conn.id, { enabled: true });
+                }
+              }
+            }
+          }
+        }
+        sendJson(res, 200, { ok: true, stopped, ...(results ? { results } : {}) });
         return;
       }
 
@@ -699,6 +796,7 @@ export function createVesperaServer(deps: ServerDependencies): Server {
               postText: body.postText ? String(body.postText) : undefined,
               hashtags: Array.isArray(body.hashtags) ? body.hashtags.map(String) : undefined,
               subreddit: body.subreddit ? String(body.subreddit) : undefined,
+              captionsPath: body.captionsPath ? String(body.captionsPath) : undefined,
               aiDisclosure: body.aiDisclosure !== false,
               signatureId: body.signatureId ? String(body.signatureId) : undefined,
               repeatIntervalDays: typeof body.repeatIntervalDays === "number" ? body.repeatIntervalDays : undefined,
@@ -982,13 +1080,18 @@ export function createVesperaServer(deps: ServerDependencies): Server {
 
       if (pathname === "/api/media/upload" && method === "POST") {
         const MAX_UPLOAD_BYTES = 512 * 1024 * 1024;
-        const kind = url.searchParams.get("kind") === "cover" ? "cover" : "video";
-        const rawFilename = url.searchParams.get("filename") || (kind === "cover" ? "cover.jpg" : "video.mp4");
-        const safeName = basename(rawFilename).replace(/[^a-zA-Z0-9._-]/g, "_") || (kind === "cover" ? "cover.jpg" : "video.mp4");
+        const rawKind = url.searchParams.get("kind");
+        const kind = rawKind === "cover" ? "cover" : rawKind === "captions" ? "captions" : "video";
+        const defaultName = kind === "cover" ? "cover.jpg" : kind === "captions" ? "captions.srt" : "video.mp4";
+        const rawFilename = url.searchParams.get("filename") || defaultName;
+        const safeName = basename(rawFilename).replace(/[^a-zA-Z0-9._-]/g, "_") || defaultName;
         const ext = extname(safeName).toLowerCase();
-        const allowed = kind === "cover"
-          ? new Set([".jpg", ".jpeg", ".png", ".webp"])
-          : new Set([".mp4", ".mov", ".webm", ".m4v"]);
+        const allowed =
+          kind === "cover"
+            ? new Set([".jpg", ".jpeg", ".png", ".webp"])
+            : kind === "captions"
+              ? new Set([".srt", ".vtt", ".sbv"])
+              : new Set([".mp4", ".mov", ".webm", ".m4v"]);
 
         if (!allowed.has(ext)) {
           sendJson(res, 400, { ok: false, error: `Unsupported ${kind} file extension '${ext || "(none)"}'.` });
@@ -1092,6 +1195,58 @@ export function createVesperaServer(deps: ServerDependencies): Server {
         return;
       }
 
+      // ---------------- Live Browser noVNC HTTP Proxy ----------------
+
+      if (pathname === "/live-browser" || pathname === "/live-browser/") {
+        const active = liveBrowser.getSession();
+        if (!active) {
+          sendJson(res, 404, { ok: false, error: "No active Live Browser session." });
+          return;
+        }
+        res.writeHead(302, { Location: active.viewerPath });
+        res.end();
+        return;
+      }
+
+      if (pathname.startsWith("/live-browser/")) {
+        const active = liveBrowser.getSession();
+        if (!active) {
+          sendJson(res, 404, { ok: false, error: "No active Live Browser session." });
+          return;
+        }
+        const strippedPath = (req.url ?? "/").replace(/^\/live-browser/, "") || "/";
+        await new Promise<void>(resolveProxy => {
+          const proxyReq = httpRequest(
+            {
+              hostname: "127.0.0.1",
+              port: liveBrowser.getProxyPort(),
+              path: strippedPath,
+              method,
+              headers: {
+                ...req.headers,
+                host: `127.0.0.1:${liveBrowser.getProxyPort()}`,
+              },
+            },
+            proxyRes => {
+              res.writeHead(proxyRes.statusCode ?? 200, proxyRes.headers);
+              proxyRes.pipe(res);
+              proxyRes.once("end", resolveProxy);
+              proxyRes.once("error", resolveProxy);
+            },
+          );
+          proxyReq.once("error", err => {
+            if (!res.headersSent) {
+              sendJson(res, 502, { ok: false, error: `Live Browser proxy error: ${err.message}` });
+            } else {
+              res.end();
+            }
+            resolveProxy();
+          });
+          req.pipe(proxyReq);
+        });
+        return;
+      }
+
       // ---------------- Static SPA Serving ----------------
 
       if (existsSync(webDistDir)) {
@@ -1122,6 +1277,54 @@ export function createVesperaServer(deps: ServerDependencies): Server {
         error: error instanceof Error ? error.message : String(error),
       });
     }
+  });
+
+  server.on("upgrade", (req, socket, head) => {
+    const rawUrl = req.url ?? "";
+    if (!rawUrl.startsWith("/live-browser/websockify") || !liveBrowser.getSession()) {
+      socket.destroy();
+      return;
+    }
+
+    const targetPath = rawUrl.replace(/^\/live-browser/, "") || "/websockify";
+    const upstream = netConnect(liveBrowser.getProxyPort(), "127.0.0.1");
+
+    const closeBoth = () => {
+      if (!socket.destroyed) socket.destroy();
+      if (!upstream.destroyed) upstream.destroy();
+    };
+
+    upstream.once("error", closeBoth);
+    socket.once("error", closeBoth);
+    upstream.once("close", () => {
+      if (!socket.destroyed) socket.end();
+    });
+    socket.once("close", () => {
+      if (!upstream.destroyed) upstream.end();
+    });
+
+    upstream.once("connect", () => {
+      const headerLines: string[] = [`GET ${targetPath} HTTP/${req.httpVersion || "1.1"}`];
+      for (let i = 0; i < req.rawHeaders.length; i += 2) {
+        const name = req.rawHeaders[i];
+        const value = req.rawHeaders[i + 1] ?? "";
+        if (name.toLowerCase() === "host") {
+          headerLines.push(`${name}: 127.0.0.1:${liveBrowser.getProxyPort()}`);
+        } else {
+          headerLines.push(`${name}: ${value}`);
+        }
+      }
+      upstream.write(`${headerLines.join("\r\n")}\r\n\r\n`);
+      if (head && head.length > 0) {
+        upstream.write(head);
+      }
+      upstream.pipe(socket);
+      socket.pipe(upstream);
+    });
+  });
+
+  server.on("close", () => {
+    void liveBrowser.stop();
   });
 
   return server;

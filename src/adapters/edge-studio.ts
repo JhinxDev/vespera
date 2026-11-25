@@ -16,6 +16,9 @@ import type {
   SessionState,
 } from "../types.js";
 
+export const LINUX_CHROME_USER_AGENT =
+  "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36";
+
 export function normalizeHandle(value?: string): string {
   return (value ?? "").trim().replace(/^@+/, "").toLowerCase();
 }
@@ -58,6 +61,10 @@ export function detectAuthOrChallengeSnapshot(
     "account has been suspended",
     "we suspended your account",
     "confirm it's you",
+    "verify it's you",
+    "confirm it's really you",
+    "we need to confirm it's really you",
+    "verify your identity",
     "you are using an unsupported browser",
     "blocked by network security",
     "you've been blocked by network security",
@@ -315,8 +322,12 @@ export function buildLinuxBrowserConnectArgs(profileDir: string, urls: string[])
     `--user-data-dir=${profileDir}`,
     "--no-sandbox",
     "--disable-dev-shm-usage",
+    `--user-agent=${LINUX_CHROME_USER_AGENT}`,
+    "--disable-blink-features=AutomationControlled",
+    "--lang=en-US",
     "--window-size=1360,900",
     "--window-position=0,0",
+    "--start-maximized",
     "--no-first-run",
     "--no-default-browser-check",
     "--disable-extensions",
@@ -362,7 +373,7 @@ export async function launchChannelEdge(
     ...(customBrowser ? { executablePath: customBrowser } : {}),
     headless: effectiveHeadless,
     viewport: { width: 1360, height: 900 },
-    userAgent: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36",
+    userAgent: LINUX_CHROME_USER_AGENT,
     locale: "en-US",
     timezoneId: process.env.TZ?.trim() || "UTC",
     ignoreDefaultArgs: ["--enable-automation"],
@@ -820,6 +831,21 @@ export class EdgeStudioAdapter implements PublishAdapter {
     };
   }
 
+  private async checkYouTubeChallenge(page: Page, channel: ChannelConfig): Promise<ExecutionResult | null> {
+    const bodyText = (await page.locator("body").innerText().catch(() => "")).slice(0, 8000);
+    const detection = detectAuthOrChallengeSnapshot(page.url(), bodyText, "youtube");
+    if (detection.status === "challenge") {
+      const shot = await this.saveShot(page, `${channel.id}-youtube-challenge`);
+      return {
+        status: "needs_human_action",
+        screenshotFile: shot,
+        message:
+          "Google requested 'Verify it's you' in YouTube Studio. Open Live Browser for this channel to verify once, then retry the job.",
+      };
+    }
+    return null;
+  }
+
   private async runYouTubeUpload(page: Page, job: PublishJob, channel: ChannelConfig): Promise<ExecutionResult> {
     const createBtn = page.getByRole("button", { name: /create/i }).first();
     await createBtn.waitFor({ state: "visible", timeout: 25_000 });
@@ -831,7 +857,25 @@ export class EdgeStudioAdapter implements PublishAdapter {
     await fileInput.setInputFiles(job.videoPath);
 
     const titleBox = page.locator("#textbox").first();
-    await titleBox.waitFor({ state: "visible", timeout: 35_000 });
+    const challengePrompt = page.getByText(/verify it's you|confirm it's really you/i).first();
+    const raceOutcome = await Promise.race([
+      titleBox.waitFor({ state: "visible", timeout: 35_000 }).then(() => "ready" as const),
+      challengePrompt.waitFor({ state: "visible", timeout: 35_000 }).then(() => "challenge" as const),
+    ]).catch(() => "timeout" as const);
+
+    const earlyChallenge = await this.checkYouTubeChallenge(page, channel);
+    if (earlyChallenge || raceOutcome === "challenge") {
+      return (
+        earlyChallenge ?? {
+          status: "needs_human_action",
+          screenshotFile: await this.saveShot(page, `${channel.id}-youtube-challenge`),
+          message:
+            "Google requested 'Verify it's you' in YouTube Studio. Open Live Browser for this channel to verify once, then retry the job.",
+        }
+      );
+    }
+
+    await titleBox.waitFor({ state: "visible", timeout: 10_000 });
     await titleBox.click();
     await page.keyboard.press("Control+A");
     await page.keyboard.insertText((job.payload.title ?? job.title).slice(0, 100));
@@ -852,9 +896,13 @@ export class EdgeStudioAdapter implements PublishAdapter {
       }
     }
 
-    const notKids = page.locator('tp-yt-paper-radio-button[name="VIDEO_MADE_FOR_KIDS_NOT_MFK"]');
-    if (await notKids.isVisible().catch(() => false)) {
-      await notKids.click();
+    const kidsSelector =
+      job.payload.madeForKids === true
+        ? 'tp-yt-paper-radio-button[name="VIDEO_MADE_FOR_KIDS_MFK"]'
+        : 'tp-yt-paper-radio-button[name="VIDEO_MADE_FOR_KIDS_NOT_MFK"]';
+    const kidsRadio = page.locator(kidsSelector);
+    if (await kidsRadio.isVisible().catch(() => false)) {
+      await kidsRadio.click();
     }
 
     if (job.payload.aiDisclosure) {
@@ -868,11 +916,56 @@ export class EdgeStudioAdapter implements PublishAdapter {
       }
     }
 
+    let captionsNote = "";
     for (let step = 0; step < 3; step++) {
       const nextBtn = page.locator("#next-button");
       await nextBtn.waitFor({ state: "visible", timeout: 20_000 });
       await nextBtn.click();
       await page.waitForTimeout(900);
+
+      if (step === 0 && job.payload.captionsPath && existsSync(job.payload.captionsPath)) {
+        try {
+          const subRow = page.locator("ytcp-video-metadata-subtitles, #subtitles-row, ytcp-uploads-video-elements").first();
+          const addSubBtn = subRow
+            .locator('#subtitles-button, button:has-text("Add"), ytcp-button:has-text("Add")')
+            .first();
+          await addSubBtn.waitFor({ state: "visible", timeout: 4000 });
+          const isDisabled = await addSubBtn.isDisabled().catch(() => false);
+          const ariaDisabled = await addSubBtn.getAttribute("aria-disabled").catch(() => null);
+          if (!isDisabled && ariaDisabled !== "true") {
+            await addSubBtn.click();
+            const uploadFileBtn = page.getByText(/upload file/i).first();
+            await uploadFileBtn.waitFor({ state: "visible", timeout: 5000 });
+            await uploadFileBtn.click();
+            const withTiming = page.getByText(/with timing/i).first();
+            if (await withTiming.isVisible({ timeout: 2000 }).catch(() => false)) {
+              await withTiming.click();
+            }
+            const continueBtn = page.getByRole("button", { name: /continue/i }).first();
+            if (await continueBtn.isVisible({ timeout: 2000 }).catch(() => false)) {
+              await continueBtn.click();
+            }
+            const capInput = page
+              .locator('ytcp-captions-upload-dialog input[type="file"], ytcp-dialog input[type="file"], input[type="file"]')
+              .last();
+            await capInput.waitFor({ state: "attached", timeout: 6000 });
+            await capInput.setInputFiles(job.payload.captionsPath);
+            await page.waitForTimeout(1500);
+            const doneSubBtn = page
+              .locator('ytcp-captions-editor #done-button, ytcp-dialog #save-button, ytcp-button:has-text("Done")')
+              .last();
+            if (await doneSubBtn.isVisible({ timeout: 4000 }).catch(() => false)) {
+              await doneSubBtn.click();
+              await page.waitForTimeout(800);
+            }
+            captionsNote = " (captions attached)";
+          } else {
+            captionsNote = " (captions skipped)";
+          }
+        } catch {
+          captionsNote = " (captions skipped)";
+        }
+      }
     }
 
     const nowMs = Date.now();
@@ -909,6 +1002,11 @@ export class EdgeStudioAdapter implements PublishAdapter {
     await doneBtn.click();
     await page.waitForTimeout(2500);
 
+    const postChallenge = await this.checkYouTubeChallenge(page, channel);
+    if (postChallenge) {
+      return postChallenge;
+    }
+
     const publishAnywayBtn = page.getByRole("button", { name: /publish anyway/i }).first();
     if (await publishAnywayBtn.isVisible({ timeout: 3500 }).catch(() => false)) {
       await publishAnywayBtn.click();
@@ -937,9 +1035,11 @@ export class EdgeStudioAdapter implements PublishAdapter {
       remoteUrl: shareLink ?? undefined,
       remoteId,
       screenshotFile: shot,
-      message: shouldPublishNow
-        ? `Published YouTube video (${shareLink ?? job.handle}).`
-        : `Scheduled YouTube video for ${job.targetDate} ${channel.defaultPostTime}.`,
+      message: `${
+        shouldPublishNow
+          ? `Published YouTube video (${shareLink ?? job.handle}).`
+          : `Scheduled YouTube video for ${job.targetDate} ${channel.defaultPostTime}.`
+      }${captionsNote}`,
     };
   }
 

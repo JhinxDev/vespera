@@ -5,6 +5,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     curl \
     procps \
+    tzdata \
+    xvfb \
+    x11vnc \
+    novnc \
+    websockify \
+    openbox \
+    fonts-liberation \
+    fonts-noto-color-emoji \
   && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

@@ -100,6 +100,7 @@ export interface PublishJobPayload {
   hashtags?: string[];
   subreddit?: string;
   thumbnailPath?: string;
+  captionsPath?: string;
   madeForKids?: boolean;
   aiDisclosure?: boolean;
   signatureId?: string;
@@ -341,6 +342,16 @@ export interface ExecutionResult {
   remoteUrl?: string;
   screenshotFile?: string;
   message: string;
+}
+
+export interface LiveBrowserSession {
+  active: boolean;
+  channelId: string;
+  platform?: string;
+  url: string;
+  startedAt: string;
+  expiresAt: string;
+  viewerPath: string;
 }
 
 export interface ChannelsFileDocument {

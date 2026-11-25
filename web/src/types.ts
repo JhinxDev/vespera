@@ -105,6 +105,7 @@ export interface PublishJob {
     hashtags?: string[];
     subreddit?: string;
     thumbnailPath?: string;
+    captionsPath?: string;
     aiDisclosure?: boolean;
     madeForKids?: boolean;
     signatureId?: string;
@@ -270,11 +271,25 @@ export interface SchedulerStatus {
   lastError?: string;
 }
 
+export interface LiveBrowserSession {
+  active: boolean;
+  channelId: string;
+  platform?: string;
+  url: string;
+  startedAt: string;
+  expiresAt: string;
+  viewerPath: string;
+}
+
 export interface BootstrapPayload {
   ok: boolean;
   name: string;
   version: string;
   mode?: string;
+  liveBrowser?: {
+    available: boolean;
+    session: LiveBrowserSession | null;
+  };
   scheduler?: SchedulerStatus;
   summary: {
     channels: number;

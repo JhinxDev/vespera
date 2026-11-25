@@ -6,6 +6,7 @@ param(
   [string]$StackDir,
   [string]$PublicHealthUrl,
   [string]$ImagePrefix,
+  [string]$Timezone,
   [string]$SyncMediaPath,
   [switch]$SkipTests,
   [switch]$AllowDirty,
@@ -29,6 +30,7 @@ if ($Port -le 0) { $Port = if ($cfg.ContainsKey("port")) { [int]$cfg["port"] } e
 if (-not $StackDir) { $StackDir = if ($cfg["stackDir"]) { [string]$cfg["stackDir"] } else { "/opt/stacks/vespera" } }
 if (-not $PublicHealthUrl) { $PublicHealthUrl = $cfg["publicHealthUrl"] }
 if (-not $ImagePrefix) { $ImagePrefix = if ($cfg["imagePrefix"]) { [string]$cfg["imagePrefix"] } else { "release-" } }
+if (-not $Timezone) { $Timezone = if ($cfg["timezone"]) { [string]$cfg["timezone"] } else { "UTC" } }
 
 if (-not $SshHost -or $CtId -le 0 -or -not $BindIp) {
   throw "Missing deploy target. Set sshHost, ctId, and bindIp in .deploy.local.json or pass -SshHost, -CtId, -BindIp."
@@ -172,6 +174,7 @@ services:
       - "${BindIp}:${Port}:4660"
     environment:
       NODE_ENV: production
+      TZ: "$Timezone"
       VESPERA_DOCKER: "1"
       VESPERA_HOST: "0.0.0.0"
       VESPERA_PORT: "4660"

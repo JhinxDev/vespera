@@ -32,8 +32,19 @@ test("Edge args omit automation flags and handle/auth/time utilities behave safe
   assert.ok(linuxArgs.includes("--user-data-dir=/data/profiles/demo"));
   assert.ok(linuxArgs.includes("--no-sandbox"));
   assert.ok(linuxArgs.includes("--disable-dev-shm-usage"));
+  assert.ok(linuxArgs.includes("--disable-blink-features=AutomationControlled"));
+  assert.ok(linuxArgs.some(a => a.startsWith("--user-agent=")));
   assert.ok(linuxArgs.includes("https://example.com/"));
   assert.equal(linuxArgs.some(a => a.includes("enable-automation")), false);
+
+  assert.equal(
+    detectAuthOrChallengeSnapshot(
+      "https://studio.youtube.com/channel/UC123",
+      "Verify it's you. To continue, we need to confirm it's really you",
+      "youtube",
+    ).status,
+    "challenge",
+  );
 
   assert.equal(detectAuthOrChallengeSnapshot("https://accounts.google.com/v3/signin", "", "youtube").status, "logged_out");
   assert.equal(detectAuthOrChallengeSnapshot("https://www.tiktok.com/", "Verify you are human", "tiktok").status, "challenge");
