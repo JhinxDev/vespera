@@ -1,0 +1,12 @@
+node_modules/
+dist/
+.env
+*.local.json
+channels.local.json
+.deploy.local.json
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+evidence/
+qa-screenshots/
+coverage/

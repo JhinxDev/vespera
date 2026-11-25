@@ -1,0 +1,94 @@
+{
+  "groups": [
+    {
+      "id": "flagship",
+      "name": "Flagship Brands",
+      "color": "#6366F1"
+    },
+    {
+      "id": "sandbox",
+      "name": "Experimental",
+      "color": "#10B981"
+    }
+  ],
+  "channels": [
+    {
+      "id": "acme-studio",
+      "name": "Acme Studio",
+      "groupId": "flagship",
+      "timezone": "America/New_York",
+      "defaultPostTime": "10:00",
+      "connections": [
+        {
+          "platform": "youtube",
+          "handle": "@AcmeStudioOfficial",
+          "enabled": true,
+          "adapter": "edge_studio"
+        },
+        {
+          "platform": "tiktok",
+          "handle": "@acmestudio",
+          "enabled": true,
+          "adapter": "edge_studio"
+        },
+        {
+          "platform": "instagram",
+          "handle": "@acmestudio",
+          "enabled": true,
+          "adapter": "edge_studio"
+        },
+        {
+          "platform": "x",
+          "handle": "@AcmeStudioHQ",
+          "enabled": true,
+          "adapter": "edge_studio"
+        },
+        {
+          "platform": "facebook",
+          "handle": "AcmeStudioPage",
+          "enabled": false,
+          "adapter": "edge_studio"
+        },
+        {
+          "platform": "reddit",
+          "handle": "u/acmestudio",
+          "enabled": false,
+          "adapter": "edge_studio"
+        },
+        {
+          "platform": "threads",
+          "handle": "@acmestudio",
+          "enabled": false,
+          "adapter": "edge_studio"
+        }
+      ]
+    },
+    {
+      "id": "indie-creator",
+      "name": "Indie Creator Lab",
+      "groupId": "sandbox",
+      "timezone": "America/New_York",
+      "defaultPostTime": "14:00",
+      "connections": [
+        {
+          "platform": "youtube",
+          "handle": "@IndieCreatorLab",
+          "enabled": true,
+          "adapter": "edge_studio"
+        },
+        {
+          "platform": "tiktok",
+          "handle": "@indiecreatorlab",
+          "enabled": true,
+          "adapter": "edge_studio"
+        },
+        {
+          "platform": "x",
+          "handle": "@IndieLabDev",
+          "enabled": true,
+          "adapter": "edge_studio"
+        }
+      ]
+    }
+  ]
+}

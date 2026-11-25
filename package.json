@@ -1,0 +1,70 @@
+{
+  "name": "vespera",
+  "version": "1.0.0",
+  "description": "Self-hosted, zero-subscription social media scheduler, direct video uploader, OAuth2 & browser session workbench, and AI/MCP creator studio.",
+  "license": "MIT",
+  "author": "JhinxDev",
+  "homepage": "https://github.com/JhinxDev/vespera#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/JhinxDev/vespera.git"
+  },
+  "bugs": {
+    "url": "https://github.com/JhinxDev/vespera/issues"
+  },
+  "keywords": [
+    "social-media",
+    "scheduler",
+    "self-hosted",
+    "playwright",
+    "mcp",
+    "youtube",
+    "tiktok",
+    "creator-tools",
+    "docker",
+    "sqlite"
+  ],
+  "type": "module",
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "bin": {
+    "vespera": "./dist/server/cli.js"
+  },
+  "scripts": {
+    "dev": "node --import tsx src/cli.ts serve",
+    "dev:web": "vite",
+    "build": "npm run build:server && npm run build:web",
+    "build:server": "tsc -p tsconfig.json",
+    "build:web": "vite build",
+    "deploy": "pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/Deploy-Vespera.ps1",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p web/tsconfig.json --noEmit",
+    "test": "node --import tsx --test tests/*.test.ts",
+    "qa:ui": "node scripts/e2e-interactive-qa.mjs",
+    "start": "node dist/server/cli.js serve",
+    "connect": "node --import tsx src/cli.ts connect",
+    "check": "node --import tsx src/cli.ts check",
+    "sync-analytics": "node --import tsx src/cli.ts sync-analytics",
+    "worker": "node --import tsx src/cli.ts worker",
+    "sync-sessions": "node scripts/sync-sessions.mjs",
+    "import-manifest": "node --import tsx src/cli.ts import-manifest",
+    "mcp": "node dist/server/cli.js mcp"
+  },
+  "dependencies": {
+    "lucide-react": "^0.511.0",
+    "playwright": "^1.50.0",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.1.6",
+    "@types/node": "^22.15.0",
+    "@types/react": "^19.1.2",
+    "@types/react-dom": "^19.1.2",
+    "@vitejs/plugin-react": "^4.4.1",
+    "tailwindcss": "^4.1.6",
+    "tsx": "^4.19.4",
+    "typescript": "^5.8.3",
+    "vite": "^6.3.5"
+  }
+}
