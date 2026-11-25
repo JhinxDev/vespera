@@ -19,9 +19,9 @@ Built with Node.js 24 (`node:sqlite`), Playwright Chromium/Edge contexts, React 
 - **$0/month Self-Hosted:** Runs locally or in a lightweight Docker container (`node:24-bookworm-slim` + SQLite), keeping all media, job history, and sessions on your own hardware.
 - **Carbon Bento Workspace:** Structured dark/light bento UI with 7-day publishing cadence bars, grouped episode cards across Week Agenda & Month Grid calendars, 9:16 portrait thumbnails, and an inline `<video>` inspector drawer.
 - **Direct Browser Media Uploads:** Stream `.mp4`, `.mov`, `.webm`, and cover images up to `512 MB` straight from the **New Post** modal (`POST /api/media/upload`) with automatic SHA-256 integrity checks.
-- **Fast Native Session Sync + Optional OAuth2:** Authenticate once in your local native browser (`npm run sync-sessions`) and push portable Playwright `storageState` cookies over Bearer-authenticated HTTPS to your headless server, or configure free official OAuth2 (`youtube` / `reddit`) for API token auto-refresh.
+- **On-Demand Live Browser, Session Sync & Optional OAuth2:** Launch an isolated container browser via embedded noVNC (`Xvfb` + `openbox` + `x11vnc` + `websockify`, idle-off with 15-minute auto-stop) to resolve 2FA or verification prompts directly in the persistent server profile, push local Edge `storageState` cookies (`npm run sync-sessions`), or configure free official OAuth2 (`youtube` / `reddit`).
+- **Full YouTube & Multi-Platform Uploader:** Populates YouTube titles, descriptions, tags, video language, and category in full Chrome on ephemeral Xvfb with native UA alongside support for **TikTok, Instagram, X, Facebook, Reddit, and Threads**, 11 built-in presets (**LinkedIn, Bluesky, Pinterest, Discord, Telegram, Slack, Mastodon, Twitch, Medium, Dev.to, WordPress**), and a UI **Custom Platform Builder**.
 - **Guarded Auto-Post Scheduler:** Paused by default (`Auto-Post: Paused`) until toggled ON in the Queue view (`POST /api/scheduler`), with one-click `Dry-Run Due` validation before live publishing.
-- **Extensible Platform Registry:** Priority support for **YouTube, TikTok, Instagram, X, Facebook, Reddit, and Threads**, plus 11 built-in presets (**LinkedIn, Bluesky, Pinterest, Discord, Telegram, Slack, Mastodon, Twitch, Medium, Dev.to, WordPress**) and a UI **Custom Platform Builder**.
 
 ## Quick Start (Docker)
 
@@ -54,11 +54,12 @@ npm start
 - Compact Connect View: `http://127.0.0.1:4660/connect`
 - Health Check: `GET http://127.0.0.1:4660/api/health`
 
-## Connecting Platforms Without Server VNC
+## Connecting Platforms (Live Browser, Session Sync & OAuth2)
 
-When hosting Vespera in a headless Docker container, you have two clean authentication paths:
+When hosting Vespera in a headless Docker container, you have three authentication paths:
 
-1. **Native Edge Session Sync (`npm run sync-sessions`):** Opens a clean, extension-free native Windows Edge profile so you sign in normally (passkeys, 2FA, captchas), then streams the resulting `storageState` cookies directly to your Vespera server:
+1. **On-Demand Live Browser (noVNC):** Click **Live Browser** from the Channels or Connect view to start an isolated `Xvfb` + `openbox` + `x11vnc` + `websockify` session (`POST /api/live-browser/start`) inside the embedded `/live-browser/` viewer. It stays idle-off until launched, auto-stops after 15 minutes, and flushes cookies cleanly to the container's persistent browser profile on stop so you can complete Google `"Verify it's you"`, 2FA, or passkey prompts directly on the server.
+2. **Native Edge Session Sync (`npm run sync-sessions`):** Opens a clean, extension-free native Windows Edge profile so you sign in locally, then streams the resulting `storageState` cookies directly to your Vespera server:
    ```bash
    # Sign in interactively for one channel + platform and verify immediately
    npm run sync-sessions -- acme-studio tiktok --remote https://vespera.example.com
@@ -66,7 +67,7 @@ When hosting Vespera in a headless Docker container, you have two clean authenti
    # Export existing local Vespera Edge profiles to your remote server headlessly
    npm run sync-sessions -- --export-only --all --remote https://vespera.example.com
    ```
-2. **Official YouTube & Reddit OAuth2:** Populate `YOUTUBE_CLIENT_ID` / `YOUTUBE_CLIENT_SECRET` or `REDDIT_CLIENT_ID` / `REDDIT_CLIENT_SECRET` in `.env` so clicking **Connect** redirects straight through `/api/oauth/:platform/start` and stores auto-refreshing tokens in SQLite (`oauth_tokens`).
+3. **Official YouTube & Reddit OAuth2:** Populate `YOUTUBE_CLIENT_ID` / `YOUTUBE_CLIENT_SECRET` or `REDDIT_CLIENT_ID` / `REDDIT_CLIENT_SECRET` in `.env` so clicking **Connect** redirects straight through `/api/oauth/:platform/start` and stores auto-refreshing tokens in SQLite (`oauth_tokens`).
 
 ## Environment Variables
 
@@ -100,6 +101,7 @@ npm run mcp                        # Start stdio MCP server for AI agents
 
 - **Scheduler:** `GET /api/scheduler` and `POST /api/scheduler` (`{ enabled, runNow, dryRun }`)
 - **Direct Media Upload:** `POST /api/media/upload?kind=video|cover&filename=<name>`
+- **Live Browser (noVNC):** `GET /api/live-browser`, `POST /api/live-browser/start`, `POST /api/live-browser/stop`, and `/live-browser/`
 - **Session State Sync:** `POST /api/channels/:id/session-state` (requires Bearer API token)
 - **OAuth2:** `GET /api/oauth/config`, `GET /api/oauth/:platform/start?channelId=<id>`
 - **Webhooks & API Keys:** Outbound HMAC-SHA256 headers (`X-Vespera-Event`, `X-Vespera-Signature`) and scoped `vsp_live_*` Bearer keys
