@@ -4,7 +4,7 @@
 
 # Vespera
 
-[![CI](https://github.com/JhinxDev/vespera/actions/workflows/ci.yml/badge.svg)](https://github.com/JhinxDev/vespera/actions/workflows/ci.yml)
+[![CI](https://github.com/JhinxDev/vespera/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/JhinxDev/vespera/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Node.js >=24](https://img.shields.io/badge/Node.js-%3E%3D24.0.0-339933.svg)](https://nodejs.org/)
 
