@@ -1,4 +1,4 @@
-import { execFile, spawn } from "node:child_process";
+import { execFile, spawn, type ChildProcess } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -326,7 +326,6 @@ export function buildLinuxBrowserConnectArgs(profileDir: string, urls: string[])
     `--user-data-dir=${profileDir}`,
     "--no-sandbox",
     "--disable-dev-shm-usage",
-    `--user-agent=${LINUX_CHROME_USER_AGENT}`,
     "--disable-blink-features=AutomationControlled",
     "--lang=en-US",
     "--window-size=1360,900",
@@ -342,6 +341,32 @@ export function buildLinuxBrowserConnectArgs(profileDir: string, urls: string[])
     "--new-window",
     ...urls,
   ];
+}
+
+function cleanupEphemeralXvfb(xvfb: ChildProcess | undefined): void {
+  if (xvfb && xvfb.exitCode === null && xvfb.signalCode === null) {
+    try {
+      xvfb.kill("SIGTERM");
+    } catch {
+      // Ignore already-exited Xvfb child.
+    }
+    setTimeout(() => {
+      try {
+        if (xvfb.exitCode === null && xvfb.signalCode === null) {
+          xvfb.kill("SIGKILL");
+        }
+      } catch {
+        // Ignore already-exited Xvfb child.
+      }
+    }, 1000).unref?.();
+  }
+  for (const p of ["/tmp/.X98-lock", "/tmp/.X11-unix/X98"]) {
+    try {
+      rmSync(p, { force: true });
+    } catch {
+      // Best-effort X98 socket/lock cleanup.
+    }
+  }
 }
 
 export async function launchChannelEdge(
@@ -371,29 +396,58 @@ export async function launchChannelEdge(
     }
   }
 
-  const effectiveHeadless = process.platform === "linux" && !process.env.DISPLAY ? true : headless;
+  let ephemeralXvfb: ChildProcess | undefined;
+  let ephemeralDisplay: string | undefined;
+  if (process.platform === "linux" && !headless && !process.env.DISPLAY && existsSync("/usr/bin/Xvfb")) {
+    cleanupEphemeralXvfb(undefined);
+    const proc = spawn("/usr/bin/Xvfb", [":98", "-screen", "0", "1360x900x24", "-ac", "-nolisten", "tcp"], {
+      stdio: "ignore",
+    });
+    const deadline = Date.now() + 4000;
+    while (Date.now() < deadline) {
+      if (existsSync("/tmp/.X11-unix/X98")) break;
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
+    if (existsSync("/tmp/.X11-unix/X98")) {
+      ephemeralXvfb = proc;
+      ephemeralDisplay = ":98";
+    } else {
+      cleanupEphemeralXvfb(proc);
+    }
+  }
+
+  const effectiveHeadless = process.platform === "linux" && !process.env.DISPLAY && !ephemeralDisplay ? true : headless;
   const customBrowser = process.env.VESPERA_BROWSER_PATH?.trim() || undefined;
-  const ctx = await chromium.launchPersistentContext(profileDir, {
-    ...(customBrowser ? { executablePath: customBrowser } : {}),
-    headless: effectiveHeadless,
-    viewport: { width: 1360, height: 900 },
-    userAgent: LINUX_CHROME_USER_AGENT,
-    locale: "en-US",
-    timezoneId: process.env.TZ?.trim() || "UTC",
-    ignoreDefaultArgs: ["--enable-automation"],
-    args: [
-      "--no-sandbox",
-      "--disable-dev-shm-usage",
-      "--disable-blink-features=AutomationControlled",
-      "--disable-extensions",
-      "--disable-sync",
-      "--mute-audio",
-    ],
-  });
-  await ctx.addInitScript(() => {
-    Object.defineProperty(navigator, "webdriver", { get: () => undefined });
-  });
-  return ctx;
+  try {
+    const ctx = await chromium.launchPersistentContext(profileDir, {
+      ...(customBrowser ? { executablePath: customBrowser } : {}),
+      ...(ephemeralDisplay ? { env: { ...process.env, DISPLAY: ephemeralDisplay } } : {}),
+      headless: effectiveHeadless,
+      viewport: { width: 1360, height: 900 },
+      ...(effectiveHeadless ? { userAgent: LINUX_CHROME_USER_AGENT } : {}),
+      locale: "en-US",
+      timezoneId: process.env.TZ?.trim() || "UTC",
+      ignoreDefaultArgs: ["--enable-automation"],
+      args: [
+        "--no-sandbox",
+        "--disable-dev-shm-usage",
+        "--disable-blink-features=AutomationControlled",
+        "--disable-extensions",
+        "--disable-sync",
+        "--mute-audio",
+      ],
+    });
+    if (ephemeralXvfb) {
+      ctx.once("close", () => cleanupEphemeralXvfb(ephemeralXvfb));
+    }
+    await ctx.addInitScript(() => {
+      Object.defineProperty(navigator, "webdriver", { get: () => undefined });
+    });
+    return ctx;
+  } catch (err) {
+    cleanupEphemeralXvfb(ephemeralXvfb);
+    throw err;
+  }
 }
 
 async function waitForPlatformHydration(page: Page, platform: string): Promise<void> {

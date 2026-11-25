@@ -33,7 +33,6 @@ test("Edge args omit automation flags and handle/auth/time utilities behave safe
   assert.ok(linuxArgs.includes("--no-sandbox"));
   assert.ok(linuxArgs.includes("--disable-dev-shm-usage"));
   assert.ok(linuxArgs.includes("--disable-blink-features=AutomationControlled"));
-  assert.ok(linuxArgs.some(a => a.startsWith("--user-agent=")));
   assert.ok(linuxArgs.includes("https://example.com/"));
   assert.equal(linuxArgs.some(a => a.includes("enable-automation")), false);
 
