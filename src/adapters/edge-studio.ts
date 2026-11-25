@@ -23,6 +23,10 @@ export function normalizeHandle(value?: string): string {
   return (value ?? "").trim().replace(/^@+/, "").toLowerCase();
 }
 
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 export function verifyExpectedHandle(
   observed: string | undefined,
   expected: string,
@@ -905,13 +909,90 @@ export class EdgeStudioAdapter implements PublishAdapter {
       await kidsRadio.click();
     }
 
-    if (job.payload.aiDisclosure) {
-      const showMore = page.getByRole("button", { name: /show more/i }).first();
+    const appliedExtras: string[] = [];
+    const needsShowMore = Boolean(
+      job.payload.aiDisclosure ||
+      job.payload.tags?.length ||
+      job.payload.videoLanguage ||
+      job.payload.category,
+    );
+    if (needsShowMore) {
+      const showMore = page.locator("#toggle-button").or(page.getByRole("button", { name: /show more/i })).first();
       if (await showMore.isVisible().catch(() => false)) {
+        await showMore.scrollIntoViewIfNeeded().catch(() => {});
         await showMore.click();
+        await page.waitForTimeout(500);
+      }
+
+      if (job.payload.aiDisclosure) {
         const alteredYes = page.locator('tp-yt-paper-radio-button[name="HAS_ALTERED_CONTENT_YES"]');
         if (await alteredYes.isVisible().catch(() => false)) {
+          await alteredYes.scrollIntoViewIfNeeded().catch(() => {});
           await alteredYes.click();
+          appliedExtras.push("altered-content");
+        }
+      }
+
+      if (job.payload.tags?.length) {
+        try {
+          const tagsInput = page
+            .locator('#tags-container input#text-input, ytcp-form-input-container#tags-container input, input[aria-label="Tags"]')
+            .first();
+          await tagsInput.scrollIntoViewIfNeeded().catch(() => {});
+          await tagsInput.waitFor({ state: "visible", timeout: 4000 });
+          await tagsInput.click();
+          await tagsInput.fill(job.payload.tags.join(", ").slice(0, 490));
+          await page.keyboard.press("Enter");
+          await page.waitForTimeout(300);
+          appliedExtras.push(`tags(${job.payload.tags.length})`);
+        } catch {
+          // Optional field; continue publish without aborting.
+        }
+      }
+
+      if (job.payload.videoLanguage) {
+        try {
+          const langTrigger = page
+            .locator("#language-input ytcp-dropdown-trigger, ytcp-form-language-input ytcp-dropdown-trigger")
+            .first();
+          await langTrigger.scrollIntoViewIfNeeded().catch(() => {});
+          await langTrigger.waitFor({ state: "visible", timeout: 4000 });
+          await langTrigger.click();
+          await page.waitForTimeout(350);
+          const langPattern = new RegExp(`^\\s*${escapeRegExp(job.payload.videoLanguage.trim())}\\s*$`, "i");
+          const langOption = page.locator("tp-yt-paper-item").filter({ hasText: langPattern }).first();
+          if (await langOption.isVisible({ timeout: 3000 }).catch(() => false)) {
+            await langOption.click();
+            await page.waitForTimeout(300);
+            appliedExtras.push(`language=${job.payload.videoLanguage}`);
+          } else {
+            await page.keyboard.press("Escape").catch(() => {});
+          }
+        } catch {
+          await page.keyboard.press("Escape").catch(() => {});
+        }
+      }
+
+      if (job.payload.category) {
+        try {
+          const catTrigger = page
+            .locator("#category ytcp-dropdown-trigger, ytcp-form-select#category ytcp-dropdown-trigger")
+            .first();
+          await catTrigger.scrollIntoViewIfNeeded().catch(() => {});
+          await catTrigger.waitFor({ state: "visible", timeout: 4000 });
+          await catTrigger.click();
+          await page.waitForTimeout(350);
+          const catPattern = new RegExp(`^\\s*${escapeRegExp(job.payload.category.trim())}\\s*$`, "i");
+          const catOption = page.locator("tp-yt-paper-item").filter({ hasText: catPattern }).first();
+          if (await catOption.isVisible({ timeout: 3000 }).catch(() => false)) {
+            await catOption.click();
+            await page.waitForTimeout(300);
+            appliedExtras.push(`category=${job.payload.category}`);
+          } else {
+            await page.keyboard.press("Escape").catch(() => {});
+          }
+        } catch {
+          await page.keyboard.press("Escape").catch(() => {});
         }
       }
     }
@@ -958,12 +1039,12 @@ export class EdgeStudioAdapter implements PublishAdapter {
               await doneSubBtn.click();
               await page.waitForTimeout(800);
             }
-            captionsNote = " (captions attached)";
+            captionsNote = "captions attached";
           } else {
-            captionsNote = " (captions skipped)";
+            captionsNote = "captions skipped";
           }
         } catch {
-          captionsNote = " (captions skipped)";
+          captionsNote = "captions skipped";
         }
       }
     }
@@ -1029,6 +1110,8 @@ export class EdgeStudioAdapter implements PublishAdapter {
         remoteId = shareLink.split("/").pop()?.split("?")[0];
       }
     }
+    const summaryParts = [...appliedExtras, ...(captionsNote ? [captionsNote] : [])];
+    const summarySuffix = summaryParts.length > 0 ? ` [${summaryParts.join(", ")}]` : "";
     const shot = await this.saveShot(page, `${channel.id}-youtube-done`);
     return {
       status: shouldPublishNow ? "published" : "scheduled",
@@ -1039,7 +1122,7 @@ export class EdgeStudioAdapter implements PublishAdapter {
         shouldPublishNow
           ? `Published YouTube video (${shareLink ?? job.handle}).`
           : `Scheduled YouTube video for ${job.targetDate} ${channel.defaultPostTime}.`
-      }${captionsNote}`,
+      }${summarySuffix}`,
     };
   }
 

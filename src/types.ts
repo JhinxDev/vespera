@@ -98,6 +98,9 @@ export interface PublishJobPayload {
   caption?: string;
   postText?: string;
   hashtags?: string[];
+  tags?: string[];
+  category?: string;
+  videoLanguage?: string;
   subreddit?: string;
   thumbnailPath?: string;
   captionsPath?: string;
@@ -387,6 +390,9 @@ export interface ManifestTarget {
   caption?: string;
   postText?: string;
   hashtags?: string[];
+  tags?: string[];
+  category?: string;
+  videoLanguage?: string;
   subreddit?: string;
   scheduleAt?: string;
   publishNowIfPastSlot?: boolean;

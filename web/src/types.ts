@@ -103,6 +103,9 @@ export interface PublishJob {
     caption?: string;
     postText?: string;
     hashtags?: string[];
+    tags?: string[];
+    category?: string;
+    videoLanguage?: string;
     subreddit?: string;
     thumbnailPath?: string;
     captionsPath?: string;
