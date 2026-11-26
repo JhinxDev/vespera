@@ -7,7 +7,9 @@ import {
   buildLinuxBrowserConnectArgs,
   buildNativeEdgeLoginArgs,
   clearProfileSessionRestore,
+  decidePublishTiming,
   detectAuthOrChallengeSnapshot,
+  extractTimeHHMM,
   formatMonthDayYear,
   formatTime12h,
   isVerticalCropPreserved,
@@ -185,5 +187,37 @@ test("normalizeYouTubeDescriptionForChapters places valid chapters before links 
   const missingZero = normalizeYouTubeDescriptionForChapters(
     "Chapters\n0:15 Start late\n1:00 Middle\n2:00 End",
   );
+  assert.equal(missingZero.warnings.length, 1);
   assert.match(missingZero.warnings[0], /0:00/);
+});
+
+test("extractTimeHHMM and decidePublishTiming enforce just-in-time and past-slot guards", () => {
+  assert.equal(extractTimeHHMM("2026-11-26T14:45:00-05:00", "10:00"), "14:45");
+  assert.equal(extractTimeHHMM("2026-11-26", "10:00"), "10:00");
+
+  const now = Date.parse("2026-11-26T12:00:00-05:00");
+  assert.equal(
+    decidePublishTiming({ platform: "youtube", publishAt: "2026-11-26T10:00:00-05:00", publishNowIfPastSlot: true }, now).mode,
+    "publish_now",
+  );
+  assert.equal(
+    decidePublishTiming({ platform: "youtube", publishAt: "2026-11-26T10:00:00-05:00", publishNowIfPastSlot: false }, now).mode,
+    "past_slot_blocked",
+  );
+  assert.equal(
+    decidePublishTiming({ platform: "tiktok", publishAt: "2026-11-26T11:50:00-05:00", publishNowIfPastSlot: false }, now).mode,
+    "publish_now",
+  );
+  assert.equal(
+    decidePublishTiming({ platform: "youtube", publishAt: "2026-11-27T10:00:00-05:00", publishNowIfPastSlot: false }, now).mode,
+    "schedule_future",
+  );
+  assert.equal(
+    decidePublishTiming({ platform: "youtube", publishAt: "2026-11-26T12:10:00-05:00", publishNowIfPastSlot: false }, now).mode,
+    "too_early",
+  );
+  assert.equal(
+    decidePublishTiming({ platform: "tiktok", publishAt: "2026-11-27T10:00:00-05:00", publishNowIfPastSlot: true }, now).mode,
+    "too_early",
+  );
 });

@@ -6,27 +6,33 @@ import type { BootstrapPayload } from "../types";
 interface Props {
   open: boolean;
   defaultDate?: string;
+  activeChannelId?: string;
   data: BootstrapPayload;
   onClose: () => void;
   onCreated: () => Promise<void>;
 }
 
-export function NewPostModal({ open, defaultDate, data, onClose, onCreated }: Props) {
-  const [channelId, setChannelId] = useState(data.channels[0]?.id ?? "");
+export function NewPostModal({ open, defaultDate, activeChannelId, data, onClose, onCreated }: Props) {
+  const [channelId, setChannelId] = useState(
+    activeChannelId && activeChannelId !== "all" ? activeChannelId : data.channels[0]?.id ?? "",
+  );
   const selectedChannel = data.channels.find(c => c.id === channelId) ?? data.channels[0];
   const [selectedPlatforms, setSelectedPlatforms] = useState<string[]>(["youtube", "tiktok", "x"]);
   const [title, setTitle] = useState("");
   const [caption, setCaption] = useState("");
   const [hashtags, setHashtags] = useState("");
+  const [youtubeTags, setYoutubeTags] = useState("");
   const [subreddit, setSubreddit] = useState("");
   const [targetDate, setTargetDate] = useState(defaultDate ?? new Date().toISOString().slice(0, 10));
   const [postTime, setPostTime] = useState(selectedChannel?.defaultPostTime ?? "10:00");
+  const [publishNowIfPastSlot, setPublishNowIfPastSlot] = useState(true);
   const [videoPath, setVideoPath] = useState("");
   const [videoSha256, setVideoSha256] = useState<string | undefined>(undefined);
   const [videoBytes, setVideoBytes] = useState<number | undefined>(undefined);
   const [coverPath, setCoverPath] = useState("");
   const [coverSha256, setCoverSha256] = useState<string | undefined>(undefined);
-  const [uploadingKind, setUploadingKind] = useState<"video" | "cover" | null>(null);
+  const [captionsPath, setCaptionsPath] = useState("");
+  const [uploadingKind, setUploadingKind] = useState<"video" | "cover" | "captions" | null>(null);
   const [delayMinutes, setDelayMinutes] = useState(0);
   const [followUpComment, setFollowUpComment] = useState("");
   const [repeatDays, setRepeatDays] = useState(0);
@@ -38,13 +44,16 @@ export function NewPostModal({ open, defaultDate, data, onClose, onCreated }: Pr
     if (defaultDate) {
       setTargetDate(defaultDate);
     }
+    if (activeChannelId && activeChannelId !== "all") {
+      setChannelId(activeChannelId);
+    }
     setErrMsg(null);
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") onClose();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [open, defaultDate, onClose]);
+  }, [open, defaultDate, activeChannelId, onClose]);
 
   useEffect(() => {
     if (!selectedChannel) return;
@@ -61,7 +70,7 @@ export function NewPostModal({ open, defaultDate, data, onClose, onCreated }: Pr
     setSelectedPlatforms(prev => (prev.includes(id) ? prev.filter(p => p !== id) : [...prev, id]));
   }
 
-  async function handleFileUpload(kind: "video" | "cover", file: File | undefined) {
+  async function handleFileUpload(kind: "video" | "cover" | "captions", file: File | undefined) {
     if (!file) return;
     setUploadingKind(kind);
     setErrMsg(null);
@@ -86,6 +95,8 @@ export function NewPostModal({ open, defaultDate, data, onClose, onCreated }: Pr
         setVideoPath(json.path);
         setVideoSha256(json.sha256);
         setVideoBytes(json.bytes);
+      } else if (kind === "captions") {
+        setCaptionsPath(json.path);
       } else {
         setCoverPath(json.path);
         setCoverSha256(json.sha256);
@@ -106,7 +117,8 @@ export function NewPostModal({ open, defaultDate, data, onClose, onCreated }: Pr
     setSaving(true);
     setErrMsg(null);
     try {
-      const tags = hashtags.split(/[\s,]+/).map(t => t.trim()).filter(Boolean);
+      const parsedHashtags = hashtags.split(/[\s,]+/).map(t => t.trim()).filter(Boolean);
+      const parsedYtTags = youtubeTags.split(",").map(t => t.trim()).filter(Boolean);
       await api.post("/api/jobs", {
         channelId: selectedChannel.id,
         platforms: selectedPlatforms,
@@ -114,10 +126,13 @@ export function NewPostModal({ open, defaultDate, data, onClose, onCreated }: Pr
         caption: caption.trim(),
         description: caption.trim(),
         postText: caption.trim().slice(0, 280),
-        hashtags: tags,
+        hashtags: parsedHashtags,
+        tags: parsedYtTags.length > 0 ? parsedYtTags : undefined,
+        captionsPath: captionsPath.trim() || undefined,
         subreddit: subreddit.trim() || undefined,
         targetDate,
         publishAt: `${targetDate}T${postTime || "10:00"}:00`,
+        publishNowIfPastSlot,
         videoPath: videoPath.trim() || undefined,
         videoSha256,
         videoBytes,
@@ -129,11 +144,13 @@ export function NewPostModal({ open, defaultDate, data, onClose, onCreated }: Pr
       });
       setTitle("");
       setCaption("");
+      setYoutubeTags("");
       setVideoPath("");
       setVideoSha256(undefined);
       setVideoBytes(undefined);
       setCoverPath("");
       setCoverSha256(undefined);
+      setCaptionsPath("");
       await onCreated();
       onClose();
     } catch (err) {
@@ -274,6 +291,52 @@ export function NewPostModal({ open, defaultDate, data, onClose, onCreated }: Pr
             />
           </div>
         </div>
+
+        {selectedPlatforms.includes("youtube") && (
+          <div className="grid grid-cols-2 gap-3 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)] p-3">
+            <div>
+              <label className="mb-1 block text-[11px] text-[var(--text-secondary)]">YouTube Tags (comma-separated)</label>
+              <input
+                value={youtubeTags}
+                onChange={e => setYoutubeTags(e.target.value)}
+                placeholder="ai, coding, shorts"
+                className="vsp-input w-full rounded-lg px-2.5 py-1.5 text-xs"
+              />
+            </div>
+            <div>
+              <div className="mb-1 flex items-center justify-between gap-2">
+                <label className="text-[11px] text-[var(--text-secondary)]">Captions (.srt / .vtt)</label>
+                <label className="cursor-pointer inline-flex items-center gap-1 rounded border border-[var(--border-subtle)] px-2 py-0.5 text-[10px] font-medium text-[var(--accent-primary)] hover:bg-[var(--bg-hover)]">
+                  <Upload className="h-3 w-3" />
+                  <span>{uploadingKind === "captions" ? "Uploading..." : "Upload SRT"}</span>
+                  <input
+                    type="file"
+                    accept=".srt,.vtt,.sbv"
+                    disabled={uploadingKind !== null}
+                    onChange={e => void handleFileUpload("captions", e.target.files?.[0])}
+                    className="hidden"
+                  />
+                </label>
+              </div>
+              <input
+                value={captionsPath}
+                onChange={e => setCaptionsPath(e.target.value)}
+                placeholder="/data/media/captions.srt"
+                className="vsp-input w-full rounded-lg px-2.5 py-1.5 text-xs font-mono"
+              />
+            </div>
+          </div>
+        )}
+
+        <label className="flex items-center gap-2 text-xs text-[var(--text-secondary)] cursor-pointer select-none">
+          <input
+            type="checkbox"
+            checked={publishNowIfPastSlot}
+            onChange={e => setPublishNowIfPastSlot(e.target.checked)}
+            className="h-3.5 w-3.5 rounded accent-[var(--accent-primary)]"
+          />
+          Publish immediately if scheduled time has already passed
+        </label>
 
         <div className="vsp-subcard grid grid-cols-3 gap-2 rounded-lg p-3">
           <div>

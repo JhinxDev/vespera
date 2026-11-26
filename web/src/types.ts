@@ -272,6 +272,8 @@ export interface SchedulerStatus {
   lastTickAt?: string;
   lastRunCount: number;
   lastError?: string;
+  dueCount?: number;
+  overdueCount?: number;
 }
 
 export interface LiveBrowserSession {

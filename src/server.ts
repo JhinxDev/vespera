@@ -49,14 +49,30 @@ function sendJson(res: ServerResponse, status: number, body: unknown): void {
   res.end(JSON.stringify(body));
 }
 
+const MAX_JSON_BODY_BYTES = 2 * 1024 * 1024;
+
 async function readBodyJson<T = Record<string, unknown>>(req: IncomingMessage): Promise<T> {
   const chunks: Buffer[] = [];
+  let totalBytes = 0;
   for await (const chunk of req) {
-    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    totalBytes += buf.length;
+    if (totalBytes > MAX_JSON_BODY_BYTES) {
+      const err = new Error("JSON request body exceeds 2 MB limit.") as Error & { statusCode?: number };
+      err.statusCode = 413;
+      throw err;
+    }
+    chunks.push(buf);
   }
   const raw = Buffer.concat(chunks).toString("utf8").trim();
   if (!raw) return {} as T;
-  return JSON.parse(raw) as T;
+  try {
+    return JSON.parse(raw) as T;
+  } catch {
+    const err = new Error("Invalid JSON request body.") as Error & { statusCode?: number };
+    err.statusCode = 400;
+    throw err;
+  }
 }
 
 function streamVideoFile(req: IncomingMessage, res: ServerResponse, filePath: string): void {
@@ -108,6 +124,8 @@ export interface SchedulerStatus {
   lastTickAt?: string;
   lastRunCount: number;
   lastError?: string;
+  dueCount: number;
+  overdueCount: number;
 }
 
 export interface SchedulerManager {
@@ -125,8 +143,20 @@ export function createSchedulerManager(store: VesperaStore, worker: PublishWorke
   let lastError: string | undefined;
   let intervalSeconds = 60;
   let timer: NodeJS.Timeout | undefined;
+  let startupTimer: NodeJS.Timeout | undefined;
 
   const isEnabled = () => store.getSetting("auto_scheduler_enabled") === "true";
+
+  const buildStatus = (): SchedulerStatus => ({
+    enabled: isEnabled(),
+    running,
+    intervalSeconds,
+    lastTickAt,
+    lastRunCount,
+    lastError,
+    dueCount: store.countDueQueuedJobs(),
+    overdueCount: store.countOverdueQueuedJobs(),
+  });
 
   async function tick(opts: { forceRun?: boolean; dryRun?: boolean } = {}): Promise<{ ran: number; results: unknown[] }> {
     if (running) return { ran: 0, results: [] };
@@ -136,14 +166,20 @@ export function createSchedulerManager(store: VesperaStore, worker: PublishWorke
     lastTickAt = new Date().toISOString();
     try {
       const results = await worker.runDueJobs({
-        limit: 2,
+        limit: 4,
         dryRun: Boolean(opts.dryRun),
       });
       lastRunCount = results.length;
       lastError = undefined;
+      if (results.length > 0 || opts.forceRun) {
+        console.log(
+          `[scheduler] tick dryRun=${Boolean(opts.dryRun)} ran=${results.length} dueRemaining=${store.countDueQueuedJobs()}`,
+        );
+      }
       return { ran: results.length, results };
     } catch (err) {
       lastError = err instanceof Error ? err.message : String(err);
+      console.error(`[scheduler] tick error: ${lastError}`);
       return { ran: 0, results: [] };
     } finally {
       running = false;
@@ -151,37 +187,33 @@ export function createSchedulerManager(store: VesperaStore, worker: PublishWorke
   }
 
   return {
-    status: () => ({
-      enabled: isEnabled(),
-      running,
-      intervalSeconds,
-      lastTickAt,
-      lastRunCount,
-      lastError,
-    }),
+    status: buildStatus,
     setEnabled: (enabled: boolean) => {
       store.setSetting("auto_scheduler_enabled", enabled ? "true" : "false");
-      return {
-        enabled: isEnabled(),
-        running,
-        intervalSeconds,
-        lastTickAt,
-        lastRunCount,
-        lastError,
-      };
+      console.log(`[scheduler] Auto-Post ${enabled ? "ENABLED" : "PAUSED"}`);
+      return buildStatus();
     },
     tick,
     start: (intervalMs = 60_000) => {
       intervalSeconds = Math.max(10, Math.round(intervalMs / 1000));
       if (timer) clearInterval(timer);
+      if (startupTimer) clearTimeout(startupTimer);
       timer = setInterval(() => {
         void tick();
       }, intervalMs);
       timer.unref?.();
+      if (isEnabled()) {
+        startupTimer = setTimeout(() => {
+          void tick();
+        }, 5000);
+        startupTimer.unref?.();
+      }
     },
     stop: () => {
       if (timer) clearInterval(timer);
+      if (startupTimer) clearTimeout(startupTimer);
       timer = undefined;
+      startupTimer = undefined;
     },
   };
 }
@@ -198,9 +230,25 @@ export function createVesperaServer(deps: ServerDependencies): Server {
   const { config, store, edgeAdapter, worker } = deps;
   const scheduler = deps.scheduler ?? createSchedulerManager(store, worker);
   const liveBrowser = new LiveBrowserManager();
+  worker.setChannelBusyGuard(channelId => {
+    const active = liveBrowser.getSession();
+    return Boolean(active?.active && active.channelId === channelId);
+  });
   const webDistDir = join(config.rootDir, "dist", "web");
   const activeConnectWatchers = new Map<string, NodeJS.Timeout>();
   const runtimeMode = process.env.VESPERA_DOCKER ? "docker" : "local";
+
+  function assertNoLiveBrowserCollision(channelId?: string): void {
+    const active = liveBrowser.getSession();
+    if (!active?.active) return;
+    if (!channelId || active.channelId === channelId) {
+      const err = new Error(
+        `Live Browser is currently open for '${active.channelId}'. Click Done & Verify or Close before running automation on that channel.`,
+      ) as Error & { statusCode?: number };
+      err.statusCode = 409;
+      throw err;
+    }
+  }
 
   function resolveCallbackBaseUrl(req: IncomingMessage): string {
     if (config.publicBaseUrl) return config.publicBaseUrl.replace(/\/+$/, "");
@@ -289,8 +337,8 @@ export function createVesperaServer(deps: ServerDependencies): Server {
 
       // ---------------- Health & Bootstrap ----------------
 
-      if (pathname === "/api/health" && method === "GET") {
-        sendJson(res, 200, {
+      if (pathname === "/api/health" && (method === "GET" || method === "HEAD")) {
+        const body = JSON.stringify({
           ok: true,
           name: "Vespera",
           version: "1.0.0",
@@ -303,6 +351,11 @@ export function createVesperaServer(deps: ServerDependencies): Server {
           scheduler: scheduler.status(),
           summary: store.statusSummary(),
         });
+        res.writeHead(200, {
+          "Content-Type": "application/json; charset=utf-8",
+          "Cache-Control": "no-store",
+        });
+        res.end(method === "HEAD" ? undefined : body);
         return;
       }
 
@@ -687,6 +740,7 @@ export function createVesperaServer(deps: ServerDependencies): Server {
           sendJson(res, 400, { ok: false, error: "Expected 'cookies' array in request body." });
           return;
         }
+        assertNoLiveBrowserCollision(channel.id);
         const applied = await applyStorageStateToProfile(channel.profileDir, body);
         sendJson(res, 200, { ok: true, channelId: channel.id, ...applied });
         return;
@@ -699,6 +753,7 @@ export function createVesperaServer(deps: ServerDependencies): Server {
           sendJson(res, 404, { ok: false, error: `Unknown channel '${checkMatch[1]}'` });
           return;
         }
+        assertNoLiveBrowserCollision(channel.id);
         const body = await readBodyJson<{ platform?: string; headless?: boolean }>(req);
         const targetPlatform = body.platform?.trim().toLowerCase();
         const selectedConns = channel.connections.filter(c =>
@@ -854,6 +909,7 @@ export function createVesperaServer(deps: ServerDependencies): Server {
           sendJson(res, 404, { ok: false, error: "Job not found" });
           return;
         }
+        assertNoLiveBrowserCollision(job.channelId);
         const body = await readBodyJson<{ dryRun?: boolean; headless?: boolean }>(req);
         const result = await worker.runSingleJob(job, {
           dryRun: Boolean(body.dryRun),
@@ -902,6 +958,7 @@ export function createVesperaServer(deps: ServerDependencies): Server {
 
       if (pathname === "/api/analytics/sync" && method === "POST") {
         const body = await readBodyJson<{ channelId?: string; platform?: string; headless?: boolean }>(req);
+        assertNoLiveBrowserCollision(body.channelId);
         const resSync = await collectChannelAnalytics(store, {
           channelId: body.channelId,
           platform: body.platform,

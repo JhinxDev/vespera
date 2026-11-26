@@ -1,6 +1,6 @@
 import { execFile, spawn, type ChildProcess } from "node:child_process";
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 import { chromium, type BrowserContext, type Page } from "playwright";
 
@@ -240,6 +240,81 @@ export function formatTime12h(hhmm: string): string {
   const suffix = h >= 12 ? "PM" : "AM";
   const h12 = h % 12 === 0 ? 12 : h % 12;
   return `${h12}:${String(m).padStart(2, "0")} ${suffix}`;
+}
+
+export function extractTimeHHMM(publishAt: string, fallback = "10:00"): string {
+  const m = /T(\d{2}:\d{2})/.exec(publishAt);
+  return m ? m[1] : fallback;
+}
+
+export function decidePublishTiming(
+  job: Pick<PublishJob, "platform" | "publishAt" | "publishNowIfPastSlot">,
+  nowMs = Date.now(),
+): { mode: "publish_now" | "schedule_future" | "too_early" | "past_slot_blocked"; reason?: string } {
+  const targetMs = Date.parse(job.publishAt);
+  if (!Number.isFinite(targetMs)) {
+    return { mode: "publish_now" };
+  }
+  const fifteenMin = 15 * 60_000;
+  const twentyMin = 20 * 60_000;
+  if (nowMs >= targetMs) {
+    if (job.publishNowIfPastSlot || nowMs - targetMs <= fifteenMin) {
+      return { mode: "publish_now" };
+    }
+    return {
+      mode: "past_slot_blocked",
+      reason: `Scheduled slot (${job.publishAt}) has passed and 'publishNowIfPastSlot' is disabled. Enable it or reschedule.`,
+    };
+  }
+  if (job.platform === "youtube" && targetMs >= nowMs + twentyMin) {
+    return { mode: "schedule_future" };
+  }
+  return {
+    mode: "too_early",
+    reason: `Skipped ${job.platform} post because scheduled slot (${job.publishAt}) is still in the future.`,
+  };
+}
+
+const profileMutexChains = new Map<string, Promise<unknown>>();
+
+export async function withChannelProfileLock<T>(profileDir: string, fn: () => Promise<T>): Promise<T> {
+  const key = resolve(profileDir).replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
+  const prev = profileMutexChains.get(key) ?? Promise.resolve();
+  const run = prev.catch(() => undefined).then(() => fn());
+  const tail = run.then(
+    () => undefined,
+    () => undefined,
+  );
+  profileMutexChains.set(key, tail);
+  try {
+    return await run;
+  } finally {
+    if (profileMutexChains.get(key) === tail) {
+      profileMutexChains.delete(key);
+    }
+  }
+}
+
+export function pruneOldEvidence(evidenceDir: string, maxFiles = 250): void {
+  try {
+    if (!existsSync(evidenceDir)) return;
+    const entries = readdirSync(evidenceDir)
+      .filter(name => /\.(png|jpg|jpeg|webp)$/i.test(name))
+      .map(name => {
+        const full = join(evidenceDir, name);
+        return { full, mtimeMs: statSync(full).mtimeMs };
+      })
+      .sort((a, b) => b.mtimeMs - a.mtimeMs);
+    for (const old of entries.slice(maxFiles)) {
+      try {
+        rmSync(old.full, { force: true });
+      } catch {
+        // Ignore single-file unlink failures.
+      }
+    }
+  } catch {
+    // Best-effort evidence retention cleanup.
+  }
 }
 
 export function truncateAtWordBoundary(text: string, maxLen: number): string {
@@ -590,10 +665,19 @@ async function inspectPlatformPage(
 
   let observedHandle: string | undefined;
   if (detection.status === "signed_in") {
-    const regex = new RegExp(`(?:@|u/)?${normalizeHandle(expectedHandle).replace(/^u\//, "")}`, "i");
+    const regex = new RegExp(`(?:@|u/)?${escapeRegExp(normalizeHandle(expectedHandle).replace(/^u\//, ""))}\\b`, "i");
     const match = regex.exec(bodyText) ?? regex.exec(url);
     if (match) {
       observedHandle = expectedHandle;
+    } else if (platform === "youtube") {
+      const ytTitle = await page
+        .locator("#entity-name, .entity-name, ytcp-navigation-drawer #channel-title")
+        .first()
+        .innerText()
+        .catch(() => "");
+      const sidebarMatch = /\bYour channel\s*\n\s*([^\n]{2,60})/i.exec(bodyText);
+      const candidate = ytTitle.trim() || sidebarMatch?.[1]?.trim();
+      if (candidate) observedHandle = candidate;
     } else {
       const redditHandle = /\bu\/([A-Za-z0-9_-]{2,30})\b/.exec(bodyText);
       const anyHandle = /@[A-Za-z0-9._-]{2,40}/.exec(bodyText);
@@ -606,6 +690,7 @@ async function inspectPlatformPage(
   const shotName = `${channelId}-${platform}-check-${Date.now()}.png`;
   const shotPath = join(evidenceDir, shotName);
   await page.screenshot({ path: shotPath }).catch(() => {});
+  pruneOldEvidence(evidenceDir);
 
   return {
     channelId,
@@ -653,15 +738,17 @@ export async function applyStorageStateToProfile(
   }
 
   mkdirSync(profileDir, { recursive: true });
-  const ctx = await launchChannelEdge(profileDir, true);
-  try {
-    if (normalized.length > 0) {
-      await ctx.addCookies(normalized);
+  await withChannelProfileLock(profileDir, async () => {
+    const ctx = await launchChannelEdge(profileDir, true);
+    try {
+      if (normalized.length > 0) {
+        await ctx.addCookies(normalized);
+      }
+    } finally {
+      await ctx.close();
+      clearProfileSessionRestore(profileDir);
     }
-  } finally {
-    await ctx.close();
-    clearProfileSessionRestore(profileDir);
-  }
+  });
 
   const domains = Array.from(new Set(normalized.map(c => (c.domain ?? "").replace(/^\./, "")).filter(Boolean))).sort();
   return { appliedCookies: normalized.length, domains };
@@ -760,45 +847,47 @@ export class EdgeStudioAdapter implements PublishAdapter {
       );
     }
 
-    const results: SessionCheckResult[] = [];
-    const requestedHeadless = options.headless ?? true;
-    let ctx = await launchChannelEdge(channel.profileDir, requestedHeadless);
-    const emptyShellPlatforms: ChannelConnection[] = [];
+    return await withChannelProfileLock(channel.profileDir, async () => {
+      const results: SessionCheckResult[] = [];
+      const requestedHeadless = options.headless ?? true;
+      let ctx = await launchChannelEdge(channel.profileDir, requestedHeadless);
+      const emptyShellPlatforms: ChannelConnection[] = [];
 
-    try {
-      const page = ctx.pages()[0] ?? await ctx.newPage();
-      for (const conn of targets) {
-        const { loginUrl } = this.resolveConnectionUrls(conn);
-        const res = await inspectPlatformPage(page, conn.platform, conn.handle, loginUrl, this.evidenceDir, channel.id);
-        // YouTube Studio frequently renders an empty SPA shell in headless mode; recheck visibly when a display exists.
-        const canLaunchVisible = process.platform !== "linux" || Boolean(process.env.DISPLAY);
-        if (requestedHeadless && canLaunchVisible && conn.platform === "youtube" && !res.note && !res.observedHandle) {
-          emptyShellPlatforms.push(conn);
-        } else {
-          results.push(res);
-        }
-      }
-    } finally {
-      await ctx.close();
-      clearProfileSessionRestore(channel.profileDir);
-    }
-
-    if (emptyShellPlatforms.length > 0) {
-      ctx = await launchChannelEdge(channel.profileDir, false);
       try {
         const page = ctx.pages()[0] ?? await ctx.newPage();
-        for (const conn of emptyShellPlatforms) {
+        for (const conn of targets) {
           const { loginUrl } = this.resolveConnectionUrls(conn);
           const res = await inspectPlatformPage(page, conn.platform, conn.handle, loginUrl, this.evidenceDir, channel.id);
-          results.push(res);
+          // YouTube Studio frequently renders an empty SPA shell in headless mode; recheck visibly when a display exists.
+          const canLaunchVisible = process.platform !== "linux" || Boolean(process.env.DISPLAY);
+          if (requestedHeadless && canLaunchVisible && conn.platform === "youtube" && !res.note && !res.observedHandle) {
+            emptyShellPlatforms.push(conn);
+          } else {
+            results.push(res);
+          }
         }
       } finally {
         await ctx.close();
         clearProfileSessionRestore(channel.profileDir);
       }
-    }
 
-    return results;
+      if (emptyShellPlatforms.length > 0) {
+        ctx = await launchChannelEdge(channel.profileDir, false);
+        try {
+          const page = ctx.pages()[0] ?? await ctx.newPage();
+          for (const conn of emptyShellPlatforms) {
+            const { loginUrl } = this.resolveConnectionUrls(conn);
+            const res = await inspectPlatformPage(page, conn.platform, conn.handle, loginUrl, this.evidenceDir, channel.id);
+            results.push(res);
+          }
+        } finally {
+          await ctx.close();
+          clearProfileSessionRestore(channel.profileDir);
+        }
+      }
+
+      return results;
+    });
   }
 
   async execute(
@@ -811,79 +900,91 @@ export class EdgeStudioAdapter implements PublishAdapter {
       return { status: "failed", message: `Connection '${job.platform}' is disabled on '${channel.id}'.` };
     }
 
+    if (!options.dryRun) {
+      const preTiming = decidePublishTiming(job);
+      if (preTiming.mode === "too_early") {
+        return { status: "queued", message: preTiming.reason ?? "Scheduled slot is in the future." };
+      }
+      if (preTiming.mode === "past_slot_blocked") {
+        return { status: "needs_human_action", message: preTiming.reason ?? "Past slot requires approval or reschedule." };
+      }
+    }
+
     const { loginUrl, composeUrl } = this.resolveConnectionUrls(connection);
     const headless = options.headless ?? (job.platform === "youtube" ? false : true);
-    const ctx = await launchChannelEdge(channel.profileDir, headless);
+    return await withChannelProfileLock(channel.profileDir, async () => {
+      const ctx = await launchChannelEdge(channel.profileDir, headless);
 
-    try {
-      const page = ctx.pages()[0] ?? await ctx.newPage();
-      const check = await inspectPlatformPage(
-        page,
-        job.platform,
-        connection.handle,
-        options.dryRun ? loginUrl : composeUrl,
-        this.evidenceDir,
-        channel.id,
-      );
+      try {
+        const page = ctx.pages()[0] ?? await ctx.newPage();
+        const check = await inspectPlatformPage(
+          page,
+          job.platform,
+          connection.handle,
+          options.dryRun ? loginUrl : composeUrl,
+          this.evidenceDir,
+          channel.id,
+        );
 
-      if (check.status === "logged_out") {
-        return {
-          status: "needs_login",
-          screenshotFile: check.screenshotFile,
-          message: check.note ?? `${job.platform} is logged out in profile '${channel.id}'. Use Connect to sign in.`,
-        };
-      }
-      if (check.status === "challenge") {
+        if (check.status === "logged_out") {
+          return {
+            status: "needs_login",
+            screenshotFile: check.screenshotFile,
+            message: check.note ?? `${job.platform} is logged out in profile '${channel.id}'. Use Connect to sign in.`,
+          };
+        }
+        if (check.status === "challenge") {
+          return {
+            status: "needs_human_action",
+            screenshotFile: check.screenshotFile,
+            message: check.note ?? `${job.platform} presented a verification challenge.`,
+          };
+        }
+
+        if (options.dryRun) {
+          return {
+            status: "queued",
+            dryRun: true,
+            screenshotFile: check.screenshotFile,
+            message: `Dry-run passed: ${job.platform} ready for ${channel.id} (${connection.handle}).`,
+          };
+        }
+
+        if (job.platform === "youtube") {
+          const skipBtn = page.getByText(/skip to youtube studio/i).first();
+          if (await skipBtn.isVisible({ timeout: 1500 }).catch(() => false)) {
+            await skipBtn.click().catch(() => {});
+            await waitForPlatformHydration(page, "youtube");
+          }
+        }
+
+        if (job.platform === "tiktok") return await this.runTikTokUpload(page, job, channel);
+        if (job.platform === "youtube") return await this.runYouTubeUpload(page, job, channel);
+        if (job.platform === "x") return await this.runXPost(page, job, channel);
+        if (job.platform === "instagram") return await this.runInstagramReel(page, job, channel);
+        if (job.platform === "facebook") return await this.runFacebookPost(page, job, channel);
+        if (job.platform === "reddit") return await this.runRedditPost(page, job, channel);
+        if (job.platform === "threads") return await this.runThreadsPost(page, job, channel);
+
+        const shot = await this.saveShot(page, `${channel.id}-${job.platform}-manual`);
         return {
           status: "needs_human_action",
-          screenshotFile: check.screenshotFile,
-          message: check.note ?? `${job.platform} presented a verification challenge.`,
+          screenshotFile: shot,
+          message: `Opened custom web studio (${composeUrl}); complete automated selector mapping or configure a webhook adapter for '${job.platform}'.`,
         };
-      }
-
-      if (options.dryRun) {
+      } catch (error) {
+        const shotName = `${channel.id}-${job.platform}-err-${Date.now()}.png`;
+        await (ctx.pages()[0]?.screenshot({ path: join(this.evidenceDir, shotName) }).catch(() => {}));
         return {
-          status: "queued",
-          dryRun: true,
-          screenshotFile: check.screenshotFile,
-          message: `Dry-run passed: ${job.platform} ready for ${channel.id} (${connection.handle}).`,
+          status: "failed",
+          screenshotFile: shotName,
+          message: error instanceof Error ? error.message : String(error),
         };
+      } finally {
+        await ctx.close();
+        clearProfileSessionRestore(channel.profileDir);
       }
-
-      if (job.platform === "youtube") {
-        const skipBtn = page.getByText(/skip to youtube studio/i).first();
-        if (await skipBtn.isVisible({ timeout: 1500 }).catch(() => false)) {
-          await skipBtn.click().catch(() => {});
-          await waitForPlatformHydration(page, "youtube");
-        }
-      }
-
-      if (job.platform === "tiktok") return await this.runTikTokUpload(page, job, channel);
-      if (job.platform === "youtube") return await this.runYouTubeUpload(page, job, channel);
-      if (job.platform === "x") return await this.runXPost(page, job, channel);
-      if (job.platform === "instagram") return await this.runInstagramReel(page, job, channel);
-      if (job.platform === "facebook") return await this.runFacebookPost(page, job, channel);
-      if (job.platform === "reddit") return await this.runRedditPost(page, job, channel);
-      if (job.platform === "threads") return await this.runThreadsPost(page, job, channel);
-
-      const shot = await this.saveShot(page, `${channel.id}-${job.platform}-manual`);
-      return {
-        status: "needs_human_action",
-        screenshotFile: shot,
-        message: `Opened custom web studio (${composeUrl}); complete automated selector mapping or configure a webhook adapter for '${job.platform}'.`,
-      };
-    } catch (error) {
-      const shotName = `${channel.id}-${job.platform}-err-${Date.now()}.png`;
-      await (ctx.pages()[0]?.screenshot({ path: join(this.evidenceDir, shotName) }).catch(() => {}));
-      return {
-        status: "failed",
-        screenshotFile: shotName,
-        message: error instanceof Error ? error.message : String(error),
-      };
-    } finally {
-      await ctx.close();
-      clearProfileSessionRestore(channel.profileDir);
-    }
+    });
   }
 
   private async saveShot(page: Page, prefix: string): Promise<string> {
@@ -948,31 +1049,44 @@ export class EdgeStudioAdapter implements PublishAdapter {
       }
     }
 
-    const nowMs = Date.now();
-    const targetMs = Date.parse(job.publishAt);
-    const shouldPostNow = job.publishNowIfPastSlot && nowMs >= targetMs;
-    const actionLabel = shouldPostNow ? /^post$/i : /^schedule$/i;
-
-    if (!shouldPostNow) {
-      const scheduleRadio = page.getByText(/^schedule$/i).first();
-      if (await scheduleRadio.isVisible().catch(() => false)) {
-        await scheduleRadio.click().catch(() => {});
-      }
+    const timing = decidePublishTiming(job);
+    if (timing.mode === "too_early") {
+      return { status: "queued", message: timing.reason ?? "Scheduled slot is still in the future." };
+    }
+    if (timing.mode === "past_slot_blocked") {
+      return { status: "needs_human_action", message: timing.reason ?? "Past slot requires approval or reschedule." };
     }
 
-    await page.waitForTimeout(4500);
-    const submitBtn = page.getByRole("button", { name: actionLabel }).last();
+    const submitBtn = page.getByRole("button", { name: /^post$/i }).last();
     await submitBtn.waitFor({ state: "visible", timeout: 45_000 });
+
+    const deadline = Date.now() + 45_000;
+    while (Date.now() < deadline) {
+      const midText = (await page.locator("body").innerText().catch(() => "")).slice(0, 6000);
+      const midGate = detectAuthOrChallengeSnapshot(page.url(), midText, "tiktok");
+      if (midGate.status === "challenge") {
+        return {
+          status: "needs_human_action",
+          screenshotFile: await this.saveShot(page, `${channel.id}-tiktok-gate`),
+          message: midGate.reason ?? "TikTok verification challenge",
+        };
+      }
+      const disabled = await submitBtn.isDisabled().catch(() => true);
+      const ariaDisabled = await submitBtn.getAttribute("aria-disabled").catch(() => null);
+      if (!disabled && ariaDisabled !== "true") break;
+      await page.waitForTimeout(1000);
+    }
+
     if (await submitBtn.isDisabled().catch(() => false)) {
       return {
         status: "needs_human_action",
         screenshotFile: await this.saveShot(page, `${channel.id}-tiktok-blocked`),
-        message: `TikTok ${shouldPostNow ? "Post" : "Schedule"} button remained disabled (processing or date slot pending).`,
+        message: "TikTok Post button remained disabled while video finished processing.",
       };
     }
 
     await submitBtn.click();
-    await page.waitForTimeout(3500);
+    await page.waitForTimeout(4000);
     const postText = (await page.locator("body").innerText().catch(() => "")).toLowerCase();
     const gateAfter = detectAuthOrChallengeSnapshot(page.url(), postText, "tiktok");
     const shot = await this.saveShot(page, `${channel.id}-tiktok-done`);
@@ -981,9 +1095,9 @@ export class EdgeStudioAdapter implements PublishAdapter {
     }
 
     return {
-      status: shouldPostNow ? "published" : "scheduled",
+      status: "published",
       screenshotFile: shot,
-      message: `TikTok Studio submitted (${shouldPostNow ? "posted now" : `scheduled ${job.targetDate} ${channel.defaultPostTime}`}).`,
+      message: "TikTok Studio submitted (posted now).",
     };
   }
 
@@ -1032,6 +1146,8 @@ export class EdgeStudioAdapter implements PublishAdapter {
     }
 
     await titleBox.waitFor({ state: "visible", timeout: 10_000 });
+    const midChallenge = await this.checkYouTubeChallenge(page, channel);
+    if (midChallenge) return midChallenge;
     await titleBox.click();
     await page.keyboard.press("Control+A");
     await page.keyboard.insertText((job.payload.title ?? job.title).slice(0, 100));
@@ -1209,9 +1325,16 @@ export class EdgeStudioAdapter implements PublishAdapter {
       }
     }
 
-    const nowMs = Date.now();
-    const targetMs = Date.parse(job.publishAt);
-    const shouldPublishNow = job.publishNowIfPastSlot && nowMs >= targetMs;
+    const timing = decidePublishTiming(job);
+    if (timing.mode === "too_early") {
+      return { status: "queued", message: timing.reason ?? "Scheduled slot is still in the future." };
+    }
+    if (timing.mode === "past_slot_blocked") {
+      return { status: "needs_human_action", message: timing.reason ?? "Past slot requires approval or reschedule." };
+    }
+
+    const shouldPublishNow = timing.mode === "publish_now";
+    const scheduledTime12h = formatTime12h(extractTimeHHMM(job.publishAt, channel.defaultPostTime));
 
     if (shouldPublishNow) {
       const publicRadio = page.locator('tp-yt-paper-radio-button[name="PUBLIC"]').first();
@@ -1232,14 +1355,25 @@ export class EdgeStudioAdapter implements PublishAdapter {
       if (await timeInput.isVisible().catch(() => false)) {
         await timeInput.click();
         await page.keyboard.press("Control+A");
-        await page.keyboard.insertText(formatTime12h(channel.defaultPostTime));
+        await page.keyboard.insertText(scheduledTime12h);
         await page.keyboard.press("Enter");
       }
     }
 
+    const preDoneChallenge = await this.checkYouTubeChallenge(page, channel);
+    if (preDoneChallenge) return preDoneChallenge;
+
     const doneBtn = page.locator("#done-button");
     await doneBtn.waitFor({ state: "visible", timeout: 25_000 });
-    await page.waitForTimeout(1500);
+    await page.waitForFunction(
+      () => {
+        const el = document.querySelector("#done-button");
+        return Boolean(el && !el.hasAttribute("disabled") && el.getAttribute("aria-disabled") !== "true");
+      },
+      undefined,
+      { timeout: 45_000 },
+    ).catch(() => {});
+    await page.waitForTimeout(1000);
     await doneBtn.click();
     await page.waitForTimeout(2500);
 
@@ -1337,15 +1471,39 @@ export class EdgeStudioAdapter implements PublishAdapter {
         return Boolean(el && !el.hasAttribute("disabled") && el.getAttribute("aria-disabled") !== "true");
       },
       undefined,
-      { timeout: 45_000 },
+      { timeout: 60_000 },
     );
     await page.waitForTimeout(800);
     await postBtn.click();
-    await page.waitForTimeout(4500);
+
+    await Promise.race([
+      page.getByText(/your post was sent/i).first().waitFor({ state: "visible", timeout: 10_000 }),
+      postBtn.waitFor({ state: "detached", timeout: 10_000 }),
+    ]).catch(() => {});
+    await page.waitForTimeout(2500);
+
+    const alertText = (await page.locator('[role="alert"]').first().innerText().catch(() => "")).trim();
+    if (alertText && /already said|something went wrong|limit|failed|couldn'?t/i.test(alertText)) {
+      return {
+        status: "failed",
+        screenshotFile: await this.saveShot(page, `${channel.id}-x-err`),
+        message: `X rejected post: ${alertText.slice(0, 200)}`,
+      };
+    }
+
+    const statusHref = await page
+      .locator('a[href*="/status/"]')
+      .first()
+      .getAttribute("href")
+      .catch(() => undefined);
+    const remoteUrl = statusHref ? new URL(statusHref, "https://x.com").toString() : undefined;
+    const remoteId = remoteUrl ? /\/status\/(\d+)/.exec(remoteUrl)?.[1] : undefined;
 
     const shot = await this.saveShot(page, `${channel.id}-x-done`);
     return {
       status: "published",
+      remoteUrl,
+      remoteId,
       screenshotFile: shot,
       message: `Posted update on X (${job.handle}).`,
     };
@@ -1495,6 +1653,12 @@ export class EdgeStudioAdapter implements PublishAdapter {
   }
 
   private async runFacebookPost(page: Page, job: PublishJob, channel: ChannelConfig): Promise<ExecutionResult> {
+    if (Date.now() < Date.parse(job.publishAt)) {
+      return {
+        status: "queued",
+        message: `Skipped Facebook post because slot (${job.publishAt}) is still in the future.`,
+      };
+    }
     const fileInput = page.locator('input[type="file"]').first();
     if (job.videoPath && (await fileInput.count()) > 0) {
       await fileInput.setInputFiles(job.videoPath);

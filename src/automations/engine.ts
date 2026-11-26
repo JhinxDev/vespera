@@ -197,7 +197,7 @@ export function applyChannelSignature(store: VesperaStore, job: PublishJob): Pub
 export function applyPostPublishAutomations(store: VesperaStore, job: PublishJob): void {
   if (job.status !== "published" && job.status !== "scheduled") return;
 
-  // Schedule delayed first comment if requested on the job payload or via active internal/global plug.
+  // Schedule delayed first comment if requested directly on the job payload.
   if (job.payload.followUpComment && (job.payload.delayCommentMinutes ?? 0) > 0) {
     const dueMs = Date.now() + (job.payload.delayCommentMinutes ?? 5) * 60_000;
     store.enqueueFollowUpComment({
@@ -207,6 +207,53 @@ export function applyPostPublishAutomations(store: VesperaStore, job: PublishJob
       commentText: job.payload.followUpComment,
       dueAt: new Date(dueMs).toISOString(),
     });
+  }
+
+  // Evaluate enabled on_publish automation plugs matching this channel (or global scope).
+  const matchingPlugs = store
+    .listPlugs()
+    .filter(
+      p =>
+        p.enabled &&
+        p.triggerType === "on_publish" &&
+        (p.scope === "global" || !p.channelId || p.channelId === job.channelId),
+    );
+  for (const plug of matchingPlugs) {
+    const allowedPlatforms = Array.isArray(plug.config?.platforms)
+      ? plug.config.platforms.map(String)
+      : undefined;
+    if (allowedPlatforms && allowedPlatforms.length > 0 && !allowedPlatforms.includes(job.platform)) {
+      continue;
+    }
+
+    if (plug.actionType === "follow_up_comment") {
+      const comment = typeof plug.config?.comment === "string" ? plug.config.comment.trim() : "";
+      if (comment) {
+        const delayMinutes =
+          typeof plug.config?.delayMinutes === "number" && Number.isFinite(plug.config.delayMinutes)
+            ? Math.max(0, plug.config.delayMinutes)
+            : 5;
+        store.enqueueFollowUpComment({
+          jobId: job.id,
+          channelId: job.channelId,
+          platform: job.platform,
+          commentText: comment,
+          dueAt: new Date(Date.now() + delayMinutes * 60_000).toISOString(),
+        });
+        store.incrementPlugRun(plug.id);
+      }
+    } else if (plug.actionType === "webhook_notify") {
+      store.incrementPlugRun(plug.id);
+      void dispatchWebhookEvent(store, "plug.triggered", {
+        plugId: plug.id,
+        plugName: plug.name,
+        jobId: job.id,
+        channelId: job.channelId,
+        platform: job.platform,
+        title: job.title,
+        remoteUrl: job.remoteUrl,
+      }).catch(() => {});
+    }
   }
 
   // Clone next evergreen repeat slot if configured.

@@ -1,5 +1,11 @@
 import type { Page } from "playwright";
-import { detectAuthOrChallengeSnapshot, launchChannelEdge, normalizeHandle } from "../adapters/edge-studio.js";
+import {
+  clearProfileSessionRestore,
+  detectAuthOrChallengeSnapshot,
+  launchChannelEdge,
+  normalizeHandle,
+  withChannelProfileLock,
+} from "../adapters/edge-studio.js";
 import type { VesperaStore } from "../db.js";
 import type { ChannelAnalyticsSnapshot, ChannelConfig, ChannelConnection } from "../types.js";
 
@@ -313,28 +319,31 @@ export async function collectChannelAnalytics(
 
     // Use visible Edge when YouTube Studio is included so SPA metrics hydrate reliably.
     const needsVisible = options.headless === false || enabledConns.some(c => c.platform === "youtube");
-    const ctx = await launchChannelEdge(channel.profileDir, !needsVisible);
+    await withChannelProfileLock(channel.profileDir, async () => {
+      const ctx = await launchChannelEdge(channel.profileDir, !needsVisible);
 
-    try {
-      const page = ctx.pages()[0] ?? await ctx.newPage();
-      for (const conn of enabledConns) {
-        if (conn.platform === "youtube") {
-          const res = await scrapeYouTubeAnalytics(page, channel, conn, store);
-          snapshots.push(res.snapshot);
-          totalVideos += res.videosUpserted;
-        } else if (conn.platform === "tiktok") {
-          const res = await scrapeTikTokAnalytics(page, channel, conn, store);
-          snapshots.push(res.snapshot);
-          totalVideos += res.videosUpserted;
-        } else {
-          const res = await scrapeProfileSummary(page, channel, conn, store);
-          snapshots.push(res.snapshot);
-          totalVideos += res.videosUpserted;
+      try {
+        const page = ctx.pages()[0] ?? await ctx.newPage();
+        for (const conn of enabledConns) {
+          if (conn.platform === "youtube") {
+            const res = await scrapeYouTubeAnalytics(page, channel, conn, store);
+            snapshots.push(res.snapshot);
+            totalVideos += res.videosUpserted;
+          } else if (conn.platform === "tiktok") {
+            const res = await scrapeTikTokAnalytics(page, channel, conn, store);
+            snapshots.push(res.snapshot);
+            totalVideos += res.videosUpserted;
+          } else {
+            const res = await scrapeProfileSummary(page, channel, conn, store);
+            snapshots.push(res.snapshot);
+            totalVideos += res.videosUpserted;
+          }
         }
+      } finally {
+        await ctx.close();
+        clearProfileSessionRestore(channel.profileDir);
       }
-    } finally {
-      await ctx.close();
-    }
+    });
   }
 
   return { snapshots, videosUpserted: totalVideos };

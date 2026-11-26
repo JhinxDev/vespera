@@ -1,24 +1,47 @@
-import { CheckCircle2, ExternalLink, Play, RefreshCw, ShieldAlert, Trash2, X } from "lucide-react";
+import { CheckCircle2, ExternalLink, Monitor, Play, RefreshCw, ShieldAlert, Trash2, X } from "lucide-react";
 import { useEffect, useState } from "react";
 import { api, formatBytesCompact, statusColorClasses } from "../api";
-import type { PlatformDefinition, PublishAttempt, PublishJob } from "../types";
+import type { JobStatus, LiveBrowserSession, PlatformDefinition, PublishAttempt, PublishJob } from "../types";
 import { PlatformBadge } from "./PlatformPill";
+import type { NotifyFn } from "./ToastStack";
 
 interface Props {
   job: PublishJob | null;
   platformDef?: PlatformDefinition;
   onClose: () => void;
+  onOpenLiveBrowser?: (session: LiveBrowserSession) => void;
+  onNotify?: NotifyFn;
   onUpdated: () => Promise<void>;
 }
 
-export function JobInspectorDrawer({ job, platformDef, onClose, onUpdated }: Props) {
+const JOB_STATUS_OPTIONS: JobStatus[] = [
+  "queued",
+  "draft",
+  "scheduled",
+  "published",
+  "needs_human_action",
+  "needs_login",
+  "failed",
+  "cancelled",
+];
+
+function isSafeEvidenceName(name?: string): name is string {
+  return Boolean(name && /^[a-zA-Z0-9._-]+$/.test(name));
+}
+
+export function JobInspectorDrawer({ job, platformDef, onClose, onOpenLiveBrowser, onNotify, onUpdated }: Props) {
   const [attempts, setAttempts] = useState<PublishAttempt[]>([]);
   const [title, setTitle] = useState("");
   const [copy, setCopy] = useState("");
   const [hashtags, setHashtags] = useState("");
+  const [tags, setTags] = useState("");
+  const [category, setCategory] = useState("");
+  const [videoLanguage, setVideoLanguage] = useState("");
   const [subreddit, setSubreddit] = useState("");
+  const [status, setStatus] = useState<JobStatus>("queued");
   const [targetDate, setTargetDate] = useState("");
   const [publishAt, setPublishAt] = useState("");
+  const [publishNowIfPastSlot, setPublishNowIfPastSlot] = useState(true);
   const [aiDisclosure, setAiDisclosure] = useState(true);
   const [busy, setBusy] = useState<string | null>(null);
   const [feedback, setFeedback] = useState<{ ok: boolean; text: string } | null>(null);
@@ -27,11 +50,22 @@ export function JobInspectorDrawer({ job, platformDef, onClose, onUpdated }: Pro
   useEffect(() => {
     if (!job) return;
     setTitle(job.payload.title ?? job.title);
-    setCopy(job.payload.caption ?? job.payload.description ?? job.payload.postText ?? "");
+    const initialCopy =
+      job.platform === "youtube"
+        ? job.payload.description ?? job.payload.caption ?? job.payload.postText ?? ""
+        : job.platform === "x"
+          ? job.payload.postText ?? job.payload.caption ?? job.payload.description ?? ""
+          : job.payload.caption ?? job.payload.description ?? job.payload.postText ?? "";
+    setCopy(initialCopy);
     setHashtags((job.payload.hashtags ?? []).join(" "));
+    setTags((job.payload.tags ?? []).join(", "));
+    setCategory(job.payload.category ?? "");
+    setVideoLanguage(job.payload.videoLanguage ?? "");
     setSubreddit(job.payload.subreddit ?? "");
+    setStatus(job.status);
     setTargetDate(job.targetDate);
     setPublishAt(job.publishAt);
+    setPublishNowIfPastSlot(job.publishNowIfPastSlot);
     setAiDisclosure(job.payload.aiDisclosure ?? true);
     setFeedback(null);
 
@@ -57,20 +91,37 @@ export function JobInspectorDrawer({ job, platformDef, onClose, onUpdated }: Pro
     setBusy("save");
     setFeedback(null);
     try {
-      const parsedTags = hashtags
+      const parsedHashtags = hashtags
         .split(/[\s,]+/)
         .map(t => t.trim())
         .filter(Boolean);
+      const parsedTags = tags
+        .split(",")
+        .map(t => t.trim())
+        .filter(Boolean);
+      const copyPatch =
+        job.platform === "youtube"
+          ? { description: copy }
+          : job.platform === "x"
+            ? { postText: copy.slice(0, 280) }
+            : { caption: copy };
       await api.patch(`/api/jobs/${job.id}`, {
         title,
+        status,
         targetDate,
         publishAt,
+        publishNowIfPastSlot,
         payload: {
           title,
-          caption: copy,
-          description: copy,
-          postText: copy.slice(0, 280),
-          hashtags: parsedTags,
+          ...copyPatch,
+          hashtags: parsedHashtags,
+          ...(job.platform === "youtube"
+            ? {
+                tags: parsedTags,
+                category: category.trim() || undefined,
+                videoLanguage: videoLanguage.trim() || undefined,
+              }
+            : {}),
           subreddit: subreddit.trim() || undefined,
           aiDisclosure,
         },
@@ -79,6 +130,29 @@ export function JobInspectorDrawer({ job, platformDef, onClose, onUpdated }: Pro
       setFeedback({ ok: true, text: "Saved changes to job." });
     } catch (err) {
       setFeedback({ ok: false, text: err instanceof Error ? err.message : String(err) });
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function handleOpenLiveBrowser() {
+    if (!job) return;
+    setBusy("liveBrowser");
+    setFeedback(null);
+    try {
+      const res = await api.post<{ ok: boolean; session: LiveBrowserSession }>("/api/live-browser/start", {
+        channelId: job.channelId,
+        platform: job.platform,
+      });
+      if (res.session && onOpenLiveBrowser) {
+        onOpenLiveBrowser(res.session);
+        onClose();
+      }
+      await onUpdated();
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setFeedback({ ok: false, text: msg });
+      onNotify?.("error", msg);
     } finally {
       setBusy(null);
     }
@@ -122,10 +196,11 @@ export function JobInspectorDrawer({ job, platformDef, onClose, onUpdated }: Pro
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex justify-end bg-black/60 backdrop-blur-[2px]">
+    <div className="fixed inset-0 z-50 flex justify-end bg-black/60 backdrop-blur-[2px]" onClick={onClose}>
       <div
         role="dialog"
         aria-label={`Inspect ${job.title}`}
+        onClick={e => e.stopPropagation()}
         className="flex h-full w-full max-w-[460px] flex-col border-l border-[var(--border-subtle)] bg-[var(--bg-surface)] shadow-2xl"
       >
         <div className="flex items-center justify-between border-b border-[var(--border-subtle)] px-5 py-4">
@@ -186,9 +261,22 @@ export function JobInspectorDrawer({ job, platformDef, onClose, onUpdated }: Pro
           )}
 
           {job.lastError && (
-            <div className="flex items-start gap-2 rounded-lg border border-rose-500/30 bg-rose-500/10 px-3 py-2 text-xs text-rose-300">
-              <ShieldAlert className="h-4 w-4 shrink-0 mt-0.5 text-rose-400" />
-              <span>{job.lastError}</span>
+            <div className="space-y-2 rounded-lg border border-rose-500/30 bg-rose-500/10 px-3 py-2 text-xs text-rose-300">
+              <div className="flex items-start gap-2">
+                <ShieldAlert className="h-4 w-4 shrink-0 mt-0.5 text-rose-400" />
+                <span>{job.lastError}</span>
+              </div>
+              {(job.status === "needs_human_action" || job.status === "needs_login") && onOpenLiveBrowser && (
+                <button
+                  type="button"
+                  disabled={busy !== null}
+                  onClick={() => void handleOpenLiveBrowser()}
+                  className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-600 px-3 py-1.5 text-[11px] font-semibold text-white hover:bg-emerald-500 disabled:opacity-60"
+                >
+                  <Monitor className="h-3.5 w-3.5" />
+                  {busy === "liveBrowser" ? "Starting Live Browser..." : "Open Live Browser to Verify"}
+                </button>
+              )}
             </div>
           )}
 
@@ -226,14 +314,29 @@ export function JobInspectorDrawer({ job, platformDef, onClose, onUpdated }: Pro
               />
             </div>
 
-            <div className="grid grid-cols-2 gap-3">
+            <div className="grid grid-cols-3 gap-2.5">
+              <div>
+                <label className="mb-1 block text-xs font-medium text-[var(--text-secondary)]">Status</label>
+                <select
+                  aria-label="Job status"
+                  value={status}
+                  onChange={e => setStatus(e.target.value as JobStatus)}
+                  className="vsp-input w-full rounded-lg px-2.5 py-2 text-xs"
+                >
+                  {JOB_STATUS_OPTIONS.map(opt => (
+                    <option key={opt} value={opt}>
+                      {opt.replace(/_/g, " ")}
+                    </option>
+                  ))}
+                </select>
+              </div>
               <div>
                 <label className="mb-1 block text-xs font-medium text-[var(--text-secondary)]">Target Date</label>
                 <input
                   type="date"
                   value={targetDate}
                   onChange={e => setTargetDate(e.target.value)}
-                  className="vsp-input w-full rounded-lg px-3 py-2 text-xs font-mono-num"
+                  className="vsp-input w-full rounded-lg px-2.5 py-2 text-xs font-mono-num"
                 />
               </div>
               <div>
@@ -242,10 +345,50 @@ export function JobInspectorDrawer({ job, platformDef, onClose, onUpdated }: Pro
                   type="text"
                   value={publishAt}
                   onChange={e => setPublishAt(e.target.value)}
-                  className="vsp-input w-full rounded-lg px-3 py-2 text-xs font-mono-num"
+                  className="vsp-input w-full rounded-lg px-2.5 py-2 text-xs font-mono-num"
                 />
               </div>
             </div>
+
+            {job.platform === "youtube" && (
+              <div className="space-y-2.5 rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)] p-3">
+                <div className="text-[11px] font-semibold uppercase tracking-wider text-[var(--text-muted)]">
+                  YouTube Studio Metadata
+                </div>
+                <div>
+                  <label className="mb-1 block text-[11px] text-[var(--text-secondary)]">Tags (comma-separated)</label>
+                  <input
+                    type="text"
+                    placeholder="coding, docker, shorts"
+                    value={tags}
+                    onChange={e => setTags(e.target.value)}
+                    className="vsp-input w-full rounded-lg px-2.5 py-1.5 text-xs"
+                  />
+                </div>
+                <div className="grid grid-cols-2 gap-2.5">
+                  <div>
+                    <label className="mb-1 block text-[11px] text-[var(--text-secondary)]">Category</label>
+                    <input
+                      type="text"
+                      placeholder="Science & Technology"
+                      value={category}
+                      onChange={e => setCategory(e.target.value)}
+                      className="vsp-input w-full rounded-lg px-2.5 py-1.5 text-xs"
+                    />
+                  </div>
+                  <div>
+                    <label className="mb-1 block text-[11px] text-[var(--text-secondary)]">Video Language</label>
+                    <input
+                      type="text"
+                      placeholder="English"
+                      value={videoLanguage}
+                      onChange={e => setVideoLanguage(e.target.value)}
+                      className="vsp-input w-full rounded-lg px-2.5 py-1.5 text-xs"
+                    />
+                  </div>
+                </div>
+              </div>
+            )}
 
             <div>
               <label className="mb-1 block text-xs font-medium text-[var(--text-secondary)]">Hashtags</label>
@@ -270,6 +413,16 @@ export function JobInspectorDrawer({ job, platformDef, onClose, onUpdated }: Pro
                 />
               </div>
             )}
+
+            <label className="flex items-center gap-2 text-xs text-[var(--text-secondary)] cursor-pointer select-none">
+              <input
+                type="checkbox"
+                checked={publishNowIfPastSlot}
+                onChange={e => setPublishNowIfPastSlot(e.target.checked)}
+                className="h-3.5 w-3.5 rounded accent-[var(--accent-primary)]"
+              />
+              Publish immediately if scheduled slot has passed
+            </label>
 
             <label className="flex items-center gap-2 text-xs text-[var(--text-secondary)] cursor-pointer select-none">
               <input
@@ -299,7 +452,7 @@ export function JobInspectorDrawer({ job, platformDef, onClose, onUpdated }: Pro
                       </span>
                     </div>
                     <p className="mt-1 text-[var(--text-secondary)]">{att.message}</p>
-                    {att.screenshotFile && (
+                    {isSafeEvidenceName(att.screenshotFile) && (
                       <button
                         type="button"
                         onClick={() => setLightboxShot(`/api/evidence/${att.screenshotFile}`)}

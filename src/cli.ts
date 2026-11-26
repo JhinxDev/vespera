@@ -47,12 +47,40 @@ async function main() {
   const worker = new PublishWorker(store, edgeAdapter, youtubeApiAdapter, webhookAdapter);
 
   if (command === "serve") {
+    const recovered = store.recoverStaleRunningJobs();
+    if (recovered.length > 0) {
+      console.warn(`[startup] Recovered ${recovered.length} stale 'running' job(s) to needs_human_action.`);
+    }
     const scheduler = createSchedulerManager(store, worker);
     scheduler.start(60_000);
     const server = createVesperaServer({ config, store, edgeAdapter, worker, scheduler });
+    let shuttingDown = false;
+    const shutdown = (signal: string) => {
+      if (shuttingDown) return;
+      shuttingDown = true;
+      console.log(`[shutdown] Received ${signal}; draining scheduler, Live Browser, HTTP server, and SQLite.`);
+      scheduler.stop();
+      server.close(() => {
+        store.close();
+        process.exit(0);
+      });
+      setTimeout(() => {
+        try {
+          store.close();
+        } catch {
+          // Ignore already closed SQLite store on forced exit.
+        }
+        process.exit(0);
+      }, 6000).unref?.();
+    };
+    process.on("SIGTERM", () => shutdown("SIGTERM"));
+    process.on("SIGINT", () => shutdown("SIGINT"));
     server.listen(config.port, config.host, () => {
       console.log(`Vespera running at http://${config.host}:${config.port}`);
       console.log(`Data directory: ${config.dataDir}`);
+      console.log(
+        `Scheduler: ${scheduler.status().enabled ? "ENABLED" : "PAUSED"} (${scheduler.status().dueCount} due, ${scheduler.status().overdueCount} overdue)`,
+      );
     });
     return;
   }

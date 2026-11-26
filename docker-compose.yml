@@ -7,11 +7,17 @@ services:
     ports:
       - "4660:4660"
     environment:
+      TZ: "${TZ:-UTC}"
       VESPERA_HOST: "0.0.0.0"
       VESPERA_PORT: "4660"
       VESPERA_DATA_DIR: "/data"
       VESPERA_CHANNELS_FILE: "/app/channels.local.json"
       VESPERA_DOCKER: "1"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     volumes:
       - vespera_data:/data
       - ./channels.local.json:/app/channels.local.json:ro

@@ -1,7 +1,7 @@
 import { ArrowUpRight, Film, Link2, Plus, Sparkles } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api, formatTimeDisplay, statusColorClasses } from "../api";
-import type { BootstrapPayload, ChannelConnection, PlatformDefinition, PublishJob } from "../types";
+import type { BootstrapPayload, ChannelConnection, LiveBrowserSession, PlatformDefinition, PublishJob } from "../types";
 import { PlatformIcon } from "./PlatformIcon";
 import type { NotifyFn } from "./ToastStack";
 
@@ -14,6 +14,7 @@ interface Props {
   onOpenNewChannel: () => void;
   onNavigateChannels: () => void;
   onNavigateCalendar: () => void;
+  onOpenLiveBrowser: (session: LiveBrowserSession) => void;
   onNotify: NotifyFn;
   onRefresh: () => Promise<void>;
 }
@@ -29,10 +30,10 @@ export function OverviewView({
   onOpenNewChannel,
   onNavigateChannels,
   onNavigateCalendar,
+  onOpenLiveBrowser,
   onNotify,
   onRefresh,
 }: Props) {
-  const [selectedDayIdx, setSelectedDayIdx] = useState<number>(1);
   const [connectBusy, setConnectBusy] = useState<string | null>(null);
   const pollTimersRef = useRef<number[]>([]);
 
@@ -85,6 +86,11 @@ export function OverviewView({
   }, [scopedJobs]);
 
   const maxBar = Math.max(1, ...weekSeries.map(d => d.total));
+  const todayIso = new Date().toLocaleDateString("en-CA");
+  const [selectedDayIdx, setSelectedDayIdx] = useState<number>(() => {
+    const idx = weekSeries.findIndex(d => d.iso === todayIso);
+    return idx >= 0 ? idx : 0;
+  });
   const activeBar = weekSeries[selectedDayIdx] ?? weekSeries[0];
 
   // Connected Platforms sub-cards (My Wallet aesthetic) from focused workspace
@@ -100,7 +106,7 @@ export function OverviewView({
     });
   }, [focusedChannel, platformById]);
 
-  // Group Upcoming Releases cleanly into unique episodes so each row represents a single video drop
+  // Group Upcoming Releases cleanly into unique episodes, prioritizing actionable episodes over already-published ones
   const upcomingEpisodes = useMemo(() => {
     const ordered = [...scopedJobs].sort((a, b) => a.publishAt.localeCompare(b.publishAt));
     const groups = new Map<
@@ -120,7 +126,18 @@ export function OverviewView({
         groups.set(key, { key, primaryJob: j, jobs: [j] });
       }
     }
-    return Array.from(groups.values()).slice(0, 5);
+    const actionableRank = (jobs: PublishJob[]) => {
+      const allDone = jobs.every(j => j.status === "published" || j.status === "cancelled");
+      return allDone ? 1 : 0;
+    };
+    return Array.from(groups.values())
+      .sort((a, b) => {
+        const ra = actionableRank(a.jobs);
+        const rb = actionableRank(b.jobs);
+        if (ra !== rb) return ra - rb;
+        return a.primaryJob.publishAt.localeCompare(b.primaryJob.publishAt);
+      })
+      .slice(0, 5);
   }, [scopedJobs]);
 
   const intel = data.analytics.intelligence;
@@ -137,9 +154,15 @@ export function OverviewView({
         oauthUrl?: string;
         command?: string;
         url: string;
+        session?: LiveBrowserSession;
       }>(`/api/channels/${channelId}/connect`, { platform });
       if (res.oauthUrl) {
         window.location.href = res.oauthUrl;
+        return;
+      }
+      if (res.mode === "live_browser" && res.session) {
+        onOpenLiveBrowser(res.session);
+        await onRefresh();
         return;
       }
       await onRefresh();
