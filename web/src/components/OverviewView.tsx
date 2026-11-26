@@ -21,6 +21,48 @@ interface Props {
 
 const FEATURED_PLATFORMS = ["youtube", "tiktok", "instagram", "x", "facebook", "reddit"];
 
+function jobUrgencyRank(status: PublishJob["status"]): number {
+  switch (status) {
+    case "needs_login":
+    case "needs_human_action":
+    case "failed":
+      return 0;
+    case "running":
+      return 1;
+    case "queued":
+      return 2;
+    case "scheduled":
+      return 3;
+    case "draft":
+      return 4;
+    case "published":
+      return 5;
+    case "cancelled":
+      return 6;
+    default:
+      return 7;
+  }
+}
+
+function statusDotClass(status: PublishJob["status"]): string {
+  switch (status) {
+    case "published":
+      return "bg-emerald-400";
+    case "scheduled":
+      return "bg-sky-400";
+    case "queued":
+      return "bg-amber-400";
+    case "running":
+      return "bg-indigo-400";
+    case "needs_login":
+    case "needs_human_action":
+    case "failed":
+      return "bg-rose-500";
+    default:
+      return "bg-zinc-500";
+  }
+}
+
 export function OverviewView({
   data,
   activeChannelId,
@@ -131,6 +173,13 @@ export function OverviewView({
       return allDone ? 1 : 0;
     };
     return Array.from(groups.values())
+      .map(group => {
+        const sortedJobs = [...group.jobs].sort((a, b) => jobUrgencyRank(a.status) - jobUrgencyRank(b.status));
+        return {
+          ...group,
+          primaryJob: sortedJobs[0] ?? group.primaryJob,
+        };
+      })
       .sort((a, b) => {
         const ra = actionableRank(a.jobs);
         const rb = actionableRank(b.jobs);
@@ -449,37 +498,59 @@ export function OverviewView({
         </section>
 
         <section className="vsp-card p-5 xl:col-span-7 flex flex-col gap-3">
-          <div className="flex items-center justify-between">
+          <div className="flex flex-wrap items-center justify-between gap-2">
             <div>
               <h2 className="text-sm font-semibold text-[var(--text-primary)]">Upcoming Releases</h2>
               <p className="mt-0.5 text-xs text-[var(--text-muted)]">
-                Clean episode queue across active workspaces
+                {activeChannelId === "all"
+                  ? "Clean episode queue across active workspaces"
+                  : `Filtered to ${focusedChannel?.name ?? activeChannelId}`}
               </p>
             </div>
-            <button
-              type="button"
-              onClick={() => upcomingEpisodes[0] && onSelectJob(upcomingEpisodes[0].primaryJob)}
-              disabled={upcomingEpisodes.length === 0}
-              className="rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-2.5 py-1 text-[11px] font-medium text-[var(--text-secondary)] hover:text-[var(--text-primary)] disabled:opacity-40"
-            >
-              Inspect Next
-            </button>
+            <div className="flex items-center gap-2">
+              {activeChannelId !== "all" && (
+                <button
+                  type="button"
+                  onClick={() => onSelectChannel("all")}
+                  className="rounded-lg border border-[var(--accent-primary)]/40 bg-[var(--accent-soft)] px-2.5 py-1 text-[11px] font-semibold text-[var(--accent-primary)] hover:bg-[var(--accent-primary)] hover:text-white"
+                >
+                  Show All Workspaces
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={() => upcomingEpisodes[0] && onSelectJob(upcomingEpisodes[0].primaryJob)}
+                disabled={upcomingEpisodes.length === 0}
+                className="rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-2.5 py-1 text-[11px] font-medium text-[var(--text-secondary)] hover:text-[var(--text-primary)] disabled:opacity-40"
+              >
+                Inspect Next
+              </button>
+            </div>
           </div>
 
           <div className="space-y-2">
             {upcomingEpisodes.map(({ key, primaryJob, jobs }) => {
-              const allPublished = jobs.every(j => j.status === "published");
-              const anyScheduled = jobs.some(j => j.status === "scheduled");
-              const badgeStatus = allPublished ? "published" : anyScheduled ? "scheduled" : primaryJob.status;
+              const sortedByUrgency = [...jobs].sort((a, b) => jobUrgencyRank(a.status) - jobUrgencyRank(b.status));
+              const nonCancelled = sortedByUrgency.filter(j => j.status !== "cancelled");
+              const badgeStatus = nonCancelled[0]?.status ?? sortedByUrgency[0]?.status ?? primaryJob.status;
+              const issueJobs = nonCancelled.filter(
+                j => j.status === "needs_login" || j.status === "needs_human_action" || j.status === "failed",
+              );
+              const badgePrefix =
+                issueJobs.length > 0
+                  ? `${issueJobs.map(j => platformById.get(j.platform)?.shortCode ?? j.platform.toUpperCase()).join("/")} · `
+                  : "";
 
               return (
-                <button
+                <div
                   key={key}
-                  type="button"
-                  onClick={() => onSelectJob(primaryJob)}
-                  className="vsp-subcard vsp-transition flex w-full items-center justify-between gap-3 px-3.5 py-2.5 text-left hover:border-[var(--border-strong)] hover:bg-[var(--bg-hover)]"
+                  className="vsp-subcard vsp-transition flex w-full items-center justify-between gap-3 px-3.5 py-2.5 hover:border-[var(--border-strong)] hover:bg-[var(--bg-hover)]"
                 >
-                  <div className="flex min-w-0 items-center gap-3">
+                  <button
+                    type="button"
+                    onClick={() => onSelectJob(primaryJob)}
+                    className="flex min-w-0 flex-1 items-center gap-3 text-left"
+                  >
                     <div className="flex h-12 w-7 shrink-0 items-center justify-center overflow-hidden rounded-md border border-[var(--border-subtle)] bg-black/50">
                       {primaryJob.coverPath ? (
                         <img
@@ -503,26 +574,38 @@ export function OverviewView({
                         </span>
                       </div>
                     </div>
-                  </div>
+                  </button>
 
                   <div className="flex shrink-0 items-center gap-2.5">
-                    <div className="hidden sm:flex items-center gap-1">
-                      {jobs.slice(0, 4).map(j => (
-                        <PlatformIcon
-                          key={j.id}
-                          platformId={j.platform}
-                          platform={platformById.get(j.platform)}
-                          size="xs"
-                        />
-                      ))}
+                    <div className="hidden sm:flex items-center gap-1.5">
+                      {jobs.slice(0, 4).map(j => {
+                        const pDef = platformById.get(j.platform);
+                        return (
+                          <button
+                            key={j.id}
+                            type="button"
+                            onClick={() => onSelectJob(j)}
+                            title={`${pDef?.name ?? j.platform}: ${j.status.replace(/_/g, " ")}`}
+                            className="relative rounded-md p-0.5 hover:bg-[var(--bg-surface)]"
+                          >
+                            <PlatformIcon platformId={j.platform} platform={pDef} size="xs" />
+                            <span
+                              className={`absolute -right-0.5 -top-0.5 h-2 w-2 rounded-full ring-1 ring-[var(--bg-elevated)] ${statusDotClass(j.status)}`}
+                            />
+                          </button>
+                        );
+                      })}
                     </div>
-                    <span
+                    <button
+                      type="button"
+                      onClick={() => onSelectJob(primaryJob)}
                       className={`rounded-full border px-2.5 py-0.5 text-[10px] font-semibold uppercase ${statusColorClasses(badgeStatus)}`}
                     >
+                      {badgePrefix}
                       {badgeStatus.replace(/_/g, " ")}
-                    </span>
+                    </button>
                   </div>
-                </button>
+                </div>
               );
             })}
             {upcomingEpisodes.length === 0 && (
