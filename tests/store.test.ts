@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { buildVideoIntelligence } from "../src/analytics/intelligence.js";
-import { applyChannelSignature, parseRssOrAtomXml } from "../src/automations/engine.js";
+import { applyChannelSignature, applyPostPublishAutomations, parseRssOrAtomXml } from "../src/automations/engine.js";
 import { VesperaStore } from "../src/db.js";
 
 test("VesperaStore manages extensible platforms, channels, jobs, automations, and analytics", () => {
@@ -126,6 +126,78 @@ test("VesperaStore manages extensible platforms, channels, jobs, automations, an
     const imp = store.importChannelsFile(chFile);
     assert.equal(imp.channels, 1);
     assert.equal(store.getChannel("demo-ch")?.connections[0].platform, "threads");
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("listRunnableJobs dispatches just-in-time across all platforms, recovers running jobs, and fires plugs", () => {
+  const dir = mkdtempSync(join(tmpdir(), "vsp-store-jit-"));
+  const store = new VesperaStore(join(dir, "test.sqlite"), join(dir, "profiles"));
+
+  try {
+    store.upsertChannel({ id: "creator-a", name: "Creator A" });
+    for (const plat of ["youtube", "tiktok", "x", "instagram", "facebook"]) {
+      store.upsertConnection({
+        channelId: "creator-a",
+        platform: plat,
+        handle: `@creator_${plat}`,
+        enabled: plat !== "facebook",
+      });
+    }
+
+    const dueAt = "2026-11-26T10:00:00-05:00";
+    const futureAt = "2026-11-27T10:00:00-05:00";
+    for (const plat of ["youtube", "tiktok", "x", "instagram", "facebook"]) {
+      store.enqueueJob({
+        channelId: "creator-a",
+        videoId: "due-vid",
+        title: "Due Episode",
+        platform: plat,
+        targetDate: "2026-11-26",
+        publishAt: dueAt,
+      });
+      store.enqueueJob({
+        channelId: "creator-a",
+        videoId: "future-vid",
+        title: "Future Episode",
+        platform: plat,
+        targetDate: "2026-11-27",
+        publishAt: futureAt,
+      });
+    }
+
+    // 5 minutes before slot: nothing runnable yet
+    assert.equal(store.listRunnableJobs("2026-11-26T09:55:00-05:00").length, 0);
+
+    // At slot: only the 4 enabled due jobs run (facebook disabled; future jobs wait)
+    const dueNow = store.listRunnableJobs("2026-11-26T10:00:00-05:00");
+    assert.equal(dueNow.length, 4);
+    assert.ok(dueNow.every(j => j.videoId === "due-vid" && j.platform !== "facebook"));
+
+    // Recover stale running job
+    const runningTarget = dueNow[0];
+    store.saveJob({ ...runningTarget, status: "running" });
+    const recovered = store.recoverStaleRunningJobs();
+    assert.equal(recovered.length, 1);
+    assert.equal(store.getJob(runningTarget.id)?.status, "needs_human_action");
+    assert.equal(store.listAttempts(runningTarget.id)[0]?.outcome, "needs_human_action");
+
+    // Automation plug triggers on published job
+    const plug = store.upsertPlug({
+      name: "TikTok Plug",
+      scope: "internal",
+      channelId: "creator-a",
+      triggerType: "on_publish",
+      actionType: "follow_up_comment",
+      config: { platforms: ["tiktok"], comment: "Full breakdown on YouTube!", delayMinutes: 5 },
+      enabled: true,
+    });
+    const ttJob = dueNow.find(j => j.platform === "tiktok")!;
+    applyPostPublishAutomations(store, { ...ttJob, status: "published" });
+    assert.equal(store.listFollowUpComments().length, 1);
+    assert.equal(store.listPlugs().find(p => p.id === plug.id)?.runsCount, 1);
   } finally {
     store.close();
     rmSync(dir, { recursive: true, force: true });

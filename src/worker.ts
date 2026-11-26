@@ -13,9 +13,12 @@ export interface WorkerRunOptions extends AdapterExecutionOptions {
   jobId?: string;
   limit?: number;
   nowIso?: string;
+  isChannelBusy?: (channelId: string) => boolean;
 }
 
 export class PublishWorker {
+  private channelBusyCheck?: (channelId: string) => boolean;
+
   constructor(
     private readonly store: VesperaStore,
     private readonly edgeAdapter: EdgeStudioAdapter,
@@ -23,15 +26,30 @@ export class PublishWorker {
     private readonly webhookAdapter: WebhookAdapter,
   ) {}
 
+  setChannelBusyGuard(check: (channelId: string) => boolean): void {
+    this.channelBusyCheck = check;
+  }
+
   async runSingleJob(job: PublishJob, options: WorkerRunOptions = {}): Promise<ExecutionResult> {
     const channel = this.store.getChannel(job.channelId);
     if (!channel) {
       return { status: "failed", message: `Unknown channel '${job.channelId}'.` };
     }
+    const busyFn = options.isChannelBusy ?? this.channelBusyCheck;
+    if (busyFn?.(channel.id)) {
+      return {
+        status: "queued",
+        message: `Skipped because Live Browser is currently active on '${channel.id}'.`,
+      };
+    }
     const connection = channel.connections.find(c => c.platform === job.platform && c.enabled);
     if (!connection) {
       return { status: "failed", message: `Connection '${job.platform}' missing or disabled on '${channel.id}'.` };
     }
+
+    console.log(
+      `[worker] ${options.dryRun ? "dry-run" : "start"} channel=${channel.id} platform=${job.platform} episode=${job.episode} job=${job.id}`,
+    );
 
     const integrity = await this.store.verifyMediaIntegrity(job);
     if (!integrity.ok) {
@@ -128,15 +146,22 @@ export class PublishWorker {
       message: result.message,
     }).catch(() => {});
 
+    console.log(
+      `[worker] done channel=${nextJob.channelId} platform=${nextJob.platform} job=${nextJob.id} status=${nextJob.status} msg=${JSON.stringify(result.message)}`,
+    );
+
     return result;
   }
 
   async runDueJobs(options: WorkerRunOptions = {}): Promise<Array<{ jobId: string; platform: string; result: ExecutionResult }>> {
-    const runnable = this.store.listRunnableJobs(options.nowIso, {
-      channelId: options.channelId,
-      platform: options.platform,
-      jobId: options.jobId,
-    });
+    const busyFn = options.isChannelBusy ?? this.channelBusyCheck;
+    const runnable = this.store
+      .listRunnableJobs(options.nowIso, {
+        channelId: options.channelId,
+        platform: options.platform,
+        jobId: options.jobId,
+      })
+      .filter(job => !busyFn?.(job.channelId));
     const limited = options.limit && options.limit > 0 ? runnable.slice(0, options.limit) : runnable;
     const results: Array<{ jobId: string; platform: string; result: ExecutionResult }> = [];
     for (const job of limited) {

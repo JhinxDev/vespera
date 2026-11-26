@@ -1049,23 +1049,62 @@ export class VesperaStore {
     filters?: { channelId?: string; platform?: string; jobId?: string },
   ): PublishJob[] {
     const nowMs = Date.parse(nowIso);
+    if (!Number.isFinite(nowMs)) return [];
+    const channelsById = new Map(this.listChannels().map(c => [c.id, c]));
     return this.listJobs({
       channelId: filters?.channelId,
       platform: filters?.platform,
       status: "queued",
     }).filter(job => {
       if (filters?.jobId && job.id !== filters.jobId) return false;
-      const platformDef = this.getPlatformDefinition(job.platform);
-      const supportsNativeSchedule = platformDef?.supportsScheduling ?? false;
-      // Platforms without native schedule pickers (e.g. X, Instagram, Reddit, Threads) only fire once within their due window.
-      if (!supportsNativeSchedule) {
-        const publishMs = Date.parse(job.publishAt);
-        if (!Number.isFinite(publishMs)) return false;
-        const tenMin = 10 * 60 * 1000;
-        return nowMs >= publishMs - tenMin;
-      }
-      return true;
+      const channel = channelsById.get(job.channelId);
+      const conn = channel?.connections.find(c => c.platform === job.platform);
+      if (!conn?.enabled) return false;
+      const publishMs = Date.parse(job.publishAt);
+      if (!Number.isFinite(publishMs)) return false;
+      return nowMs >= publishMs;
     });
+  }
+
+  countDueQueuedJobs(nowIso = new Date().toISOString()): number {
+    return this.listRunnableJobs(nowIso).length;
+  }
+
+  countOverdueQueuedJobs(nowIso = new Date().toISOString()): number {
+    const nowMs = Date.parse(nowIso);
+    if (!Number.isFinite(nowMs)) return 0;
+    const cutoff = nowMs - 60_000;
+    return this.listRunnableJobs(nowIso).filter(job => {
+      const publishMs = Date.parse(job.publishAt);
+      return Number.isFinite(publishMs) && publishMs < cutoff;
+    }).length;
+  }
+
+  recoverStaleRunningJobs(): PublishJob[] {
+    const runningJobs = this.listJobs({ status: "running" });
+    if (runningJobs.length === 0) return [];
+    const now = new Date().toISOString();
+    const message = "Server restarted while job was running; verify on platform before retrying.";
+    const recovered: PublishJob[] = [];
+    for (const job of runningJobs) {
+      const updated: PublishJob = {
+        ...job,
+        status: "needs_human_action",
+        lastError: message,
+        updatedAt: now,
+      };
+      this.saveJob(updated);
+      this.recordAttempt({
+        jobId: job.id,
+        adapter: job.adapter,
+        startedAt: now,
+        finishedAt: now,
+        outcome: "needs_human_action",
+        message,
+      });
+      recovered.push(updated);
+    }
+    return recovered;
   }
 
   listAllowedMediaRoots(): string[] {
@@ -1340,6 +1379,13 @@ export class VesperaStore {
 
   deletePlug(id: string): boolean {
     return Number(this.db.prepare("DELETE FROM automation_plugs WHERE id = ?").run(id).changes ?? 0) > 0;
+  }
+
+  incrementPlugRun(id: string): void {
+    const now = new Date().toISOString();
+    this.db
+      .prepare("UPDATE automation_plugs SET runs_count = runs_count + 1, last_run_at = ?, updated_at = ? WHERE id = ?")
+      .run(now, now, id);
   }
 
   listRssFeeds(): RssFeedRecord[] {

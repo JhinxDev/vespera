@@ -1,4 +1,5 @@
 import {
+  AlertTriangle,
   BarChart3,
   Calendar,
   Check,
@@ -9,7 +10,10 @@ import {
   LayoutGrid,
   Link2,
   Menu,
+  Monitor,
   Moon,
+  Pause,
+  Play,
   Plus,
   RefreshCw,
   Search,
@@ -26,6 +30,7 @@ import { CalendarView } from "./components/CalendarView";
 import { ChannelsView } from "./components/ChannelsView";
 import { ConnectAppView } from "./components/ConnectAppView";
 import { JobInspectorDrawer } from "./components/JobInspectorDrawer";
+import { LiveBrowserModal, type LiveVerifyResult } from "./components/LiveBrowserModal";
 import { NewChannelModal } from "./components/NewChannelModal";
 import { NewPostModal } from "./components/NewPostModal";
 import { OverviewView } from "./components/OverviewView";
@@ -33,7 +38,7 @@ import { PlatformIcon } from "./components/PlatformIcon";
 import { QueueView } from "./components/QueueView";
 import { ToastStack, type ToastItem, type ToastTone } from "./components/ToastStack";
 import { VesperaLogo } from "./components/VesperaLogo";
-import type { BootstrapPayload, PlatformDefinition, PublishJob } from "./types";
+import type { BootstrapPayload, LiveBrowserSession, PlatformDefinition, PublishJob } from "./types";
 
 export type NavView = "overview" | "calendar" | "queue" | "analytics" | "channels" | "automations" | "api";
 
@@ -111,6 +116,8 @@ export function App() {
   const [cmdOpen, setCmdOpen] = useState(false);
   const [cmdQuery, setCmdQuery] = useState("");
   const [toasts, setToasts] = useState<ToastItem[]>([]);
+  const [liveSession, setLiveSession] = useState<LiveBrowserSession | null>(null);
+  const [schedulerBusy, setSchedulerBusy] = useState(false);
   const syncedTimerRef = useRef<number | null>(null);
   const toastTimersRef = useRef<Map<string, number>>(new Map());
   const [theme, setTheme] = useState<"dark" | "light">(() => {
@@ -219,6 +226,19 @@ export function App() {
     };
   }, [loadData]);
 
+  const anyJobRunning = Boolean(data?.scheduler?.running || data?.jobs.some(j => j.status === "running"));
+
+  useEffect(() => {
+    if (isConnectRoute) return;
+    const intervalMs = anyJobRunning ? 5_000 : 30_000;
+    const id = window.setInterval(() => {
+      if (document.visibilityState === "visible") {
+        void loadData(false);
+      }
+    }, intervalMs);
+    return () => window.clearInterval(id);
+  }, [isConnectRoute, anyJobRunning, loadData]);
+
   useEffect(() => {
     if (isConnectRoute) return;
     const onKeyDown = (e: KeyboardEvent) => {
@@ -261,6 +281,65 @@ export function App() {
     for (const p of data?.platforms ?? []) map.set(p.id, p);
     return map;
   }, [data?.platforms]);
+
+  const overdueQueuedCount = useMemo(() => {
+    if (!data) return 0;
+    if (typeof data.scheduler?.overdueCount === "number") {
+      return data.scheduler.overdueCount;
+    }
+    const cutoff = Date.now() - 60_000;
+    return data.jobs.filter(j => {
+      if (j.status !== "queued") return false;
+      const ms = Date.parse(j.publishAt);
+      return Number.isFinite(ms) && ms < cutoff;
+    }).length;
+  }, [data]);
+
+  async function handleToggleAutoPost() {
+    if (!data?.scheduler) return;
+    setSchedulerBusy(true);
+    try {
+      const nextEnabled = !data.scheduler.enabled;
+      await api.post("/api/scheduler", { enabled: nextEnabled });
+      await loadData(false);
+      pushToast(
+        nextEnabled ? "success" : "info",
+        nextEnabled
+          ? "Auto-Post enabled: Vespera will dispatch due jobs every 60 seconds."
+          : "Auto-Post paused: queued jobs will wait until triggered manually.",
+      );
+    } catch (err) {
+      pushToast("error", err instanceof Error ? err.message : String(err));
+    } finally {
+      setSchedulerBusy(false);
+    }
+  }
+
+  async function handleLiveBrowserClosed(outcome?: { verified: boolean; results?: LiveVerifyResult[] }) {
+    setLiveSession(null);
+    await loadData(false);
+    if (!outcome?.verified) {
+      pushToast("info", "Closed container Live Browser.");
+      return;
+    }
+    const list = outcome.results ?? [];
+    if (list.length === 1) {
+      const item = list[0];
+      const ok = item.status === "signed_in";
+      const label = platformById.get(item.platform)?.name ?? item.platform;
+      pushToast(
+        ok ? "success" : "warning",
+        ok
+          ? `${label} verified: SIGNED IN${item.observedHandle ? ` as ${item.observedHandle}` : ""}.`
+          : `${label} status: ${item.status.replace(/_/g, " ").toUpperCase()}${item.note ? ` (${item.note})` : ""}.`,
+      );
+    } else if (list.length > 1) {
+      const signedIn = list.filter(x => x.status === "signed_in").length;
+      pushToast(signedIn === list.length ? "success" : "warning", `Verified ${signedIn}/${list.length} sessions.`);
+    } else {
+      pushToast("success", "Saved container Live Browser profile.");
+    }
+  }
 
   const activePlatformDef = useMemo(() => {
     if (!data || !selectedJob) return undefined;
@@ -404,7 +483,7 @@ export function App() {
             <div className="flex items-center justify-between px-1 text-[11px] text-[var(--text-muted)]">
               <span className="inline-flex items-center gap-1.5">
                 <span className="h-2 w-2 rounded-full bg-emerald-400" />
-                Local Node
+                {data?.mode === "docker" ? "Docker Node" : "Local Node"}
               </span>
               <span className="font-mono-num">v{data?.version ?? "1.0.0"}</span>
             </div>
@@ -518,6 +597,22 @@ export function App() {
                 ))}
               </select>
             )}
+            {data?.scheduler && (
+              <button
+                type="button"
+                disabled={schedulerBusy}
+                onClick={() => void handleToggleAutoPost()}
+                title={data.scheduler.enabled ? "Auto-Post is active (click to pause)" : "Auto-Post is paused (click to enable)"}
+                className={`vsp-transition hidden md:inline-flex items-center gap-1.5 rounded-xl border px-3 py-1.5 text-xs font-semibold disabled:opacity-60 ${
+                  data.scheduler.enabled
+                    ? "border-emerald-500/35 bg-emerald-500/12 text-emerald-400 hover:bg-emerald-500/20"
+                    : "border-amber-500/35 bg-amber-500/12 text-amber-300 hover:bg-amber-500/20"
+                }`}
+              >
+                {data.scheduler.enabled ? <Pause className="h-3 w-3" /> : <Play className="h-3 w-3" />}
+                <span>{data.scheduler.enabled ? "Auto-Post: ON" : "Auto-Post: Paused"}</span>
+              </button>
+            )}
             <button
               type="button"
               onClick={toggleTheme}
@@ -556,6 +651,48 @@ export function App() {
             </div>
           )}
 
+          {data && !data.scheduler?.enabled && overdueQueuedCount > 0 && (
+            <div className="mb-4 vsp-card flex flex-wrap items-center justify-between gap-3 border border-amber-500/35 bg-amber-500/10 px-4 py-3 text-xs">
+              <div className="flex items-center gap-2.5 text-amber-200">
+                <AlertTriangle className="h-4 w-4 shrink-0 text-amber-400" />
+                <span>
+                  <strong>Auto-Post is paused</strong> with{" "}
+                  <strong className="font-mono-num">{overdueQueuedCount}</strong> overdue queued post(s) past their scheduled slot.
+                </span>
+              </div>
+              <button
+                type="button"
+                disabled={schedulerBusy}
+                onClick={() => void handleToggleAutoPost()}
+                className="inline-flex items-center gap-1.5 rounded-xl bg-amber-500 px-3 py-1.5 text-xs font-semibold text-slate-950 hover:bg-amber-400 disabled:opacity-60"
+              >
+                <Play className="h-3.5 w-3.5" />
+                Enable Auto-Post
+              </button>
+            </div>
+          )}
+
+          {data?.liveBrowser?.session?.active && !liveSession && (
+            <div className="mb-4 vsp-card flex flex-wrap items-center justify-between gap-3 border border-emerald-500/35 bg-emerald-500/8 px-4 py-3 text-xs">
+              <div className="flex items-center gap-2.5">
+                <Monitor className="h-4 w-4 text-emerald-400" />
+                <span>
+                  <strong>Active Live Browser:</strong>{" "}
+                  {data.liveBrowser.session.channelId}
+                  {data.liveBrowser.session.platform ? ` (${data.liveBrowser.session.platform})` : ""} is running on the server.
+                </span>
+              </div>
+              <button
+                type="button"
+                onClick={() => setLiveSession(data.liveBrowser?.session ?? null)}
+                className="inline-flex items-center gap-1.5 rounded-xl bg-emerald-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-emerald-500"
+              >
+                <Monitor className="h-3.5 w-3.5" />
+                Resume Live Browser
+              </button>
+            </div>
+          )}
+
           {!data ? (
             <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
               {[0, 1, 2, 3].map(i => (
@@ -575,6 +712,7 @@ export function App() {
               onOpenNewChannel={() => setNewChannelOpen(true)}
               onNavigateChannels={() => navigateView("channels")}
               onNavigateCalendar={() => navigateView("calendar")}
+              onOpenLiveBrowser={setLiveSession}
               onNotify={pushToast}
               onRefresh={() => loadData(false)}
             />
@@ -610,6 +748,7 @@ export function App() {
             <ChannelsView
               data={data}
               activeChannelId={activeChannelId}
+              onOpenLiveBrowser={setLiveSession}
               onNotify={pushToast}
               onRefresh={() => loadData(false)}
             />
@@ -732,6 +871,8 @@ export function App() {
         job={selectedJob}
         platformDef={activePlatformDef}
         onClose={() => setSelectedJob(null)}
+        onOpenLiveBrowser={setLiveSession}
+        onNotify={pushToast}
         onUpdated={() => loadData(false)}
       />
 
@@ -739,6 +880,7 @@ export function App() {
         <NewPostModal
           open={newPostOpen}
           defaultDate={newPostDate}
+          activeChannelId={activeChannelId}
           data={data}
           onClose={() => setNewPostOpen(false)}
           onCreated={() => loadData(false)}
@@ -756,6 +898,12 @@ export function App() {
           }}
         />
       )}
+
+      <LiveBrowserModal
+        session={liveSession}
+        onClosed={handleLiveBrowserClosed}
+        onError={msg => pushToast("error", msg)}
+      />
     </div>
   );
 }

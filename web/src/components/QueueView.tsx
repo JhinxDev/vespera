@@ -56,6 +56,22 @@ export function QueueView({ data, activeChannelId, onSelectChannel, onSelectJob,
     }
   }
 
+  async function handleRunDueNow() {
+    setSchedulerBusy(true);
+    try {
+      const res = await api.post<{ ok: boolean; ran?: number }>(
+        "/api/scheduler",
+        { runNow: true, dryRun: false },
+      );
+      await onRefresh();
+      onNotify("success", `Executed ${res.ran ?? 0} due job(s) live.`);
+    } catch (err) {
+      onNotify("error", err instanceof Error ? err.message : String(err));
+    } finally {
+      setSchedulerBusy(false);
+    }
+  }
+
   const platformById = useMemo(() => {
     const map = new Map<string, PlatformDefinition>();
     for (const p of data.platforms) map.set(p.id, p);
@@ -104,7 +120,7 @@ export function QueueView({ data, activeChannelId, onSelectChannel, onSelectJob,
             className="vsp-input rounded-xl px-2.5 py-1.5 text-xs"
           >
             <option value="all">All Statuses ({data.jobs.length})</option>
-            {["queued", "scheduled", "published", "draft", "needs_login", "needs_human_action", "failed"].map(s => (
+            {["queued", "running", "scheduled", "published", "draft", "needs_login", "needs_human_action", "failed", "cancelled"].map(s => (
               <option key={s} value={s}>
                 {s.replace(/_/g, " ")} ({data.summary.jobsByStatus[s] ?? 0})
               </option>
@@ -133,6 +149,15 @@ export function QueueView({ data, activeChannelId, onSelectChannel, onSelectJob,
               >
                 <Sparkles className="h-3.5 w-3.5" />
                 <span>Dry-Run Due</span>
+              </button>
+              <button
+                type="button"
+                disabled={schedulerBusy}
+                onClick={() => void handleRunDueNow()}
+                className="vsp-transition inline-flex items-center gap-1.5 rounded-xl bg-[var(--accent-primary)] px-3 py-1.5 text-xs font-semibold text-white hover:bg-[var(--accent-hover)] disabled:opacity-60"
+              >
+                <Play className="h-3.5 w-3.5" />
+                <span>Run Due Now</span>
               </button>
             </>
           )}
@@ -180,7 +205,12 @@ export function QueueView({ data, activeChannelId, onSelectChannel, onSelectJob,
                     </div>
                   </td>
                   <td className="px-3 py-2.5 font-mono-num text-[var(--text-secondary)]">
-                    {job.targetDate} {formatTimeDisplay(job.publishAt)}
+                    <span>{job.targetDate} {formatTimeDisplay(job.publishAt)}</span>
+                    {job.status === "queued" && Number.isFinite(Date.parse(job.publishAt)) && Date.parse(job.publishAt) < Date.now() - 60_000 && (
+                      <span className="ml-2 rounded bg-amber-500/15 px-1.5 py-0.5 text-[9px] font-semibold uppercase text-amber-300">
+                        Overdue
+                      </span>
+                    )}
                   </td>
                   <td className="px-3 py-2.5">
                     <span className={`inline-block rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase ${statusColorClasses(job.status)}`}>

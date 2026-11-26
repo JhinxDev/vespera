@@ -1,7 +1,7 @@
 import { Check, Copy, ExternalLink, RefreshCw, Sparkles, TrendingUp } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { api, copyTextSafely } from "../api";
-import type { BootstrapPayload, PlatformDefinition } from "../types";
+import type { BootstrapPayload, PlatformDefinition, VideoIntelligenceReport } from "../types";
 import { PlatformBadge } from "./PlatformPill";
 import type { NotifyFn } from "./ToastStack";
 
@@ -16,8 +16,30 @@ interface Props {
 export function AnalyticsView({ data, activeChannelId, onSelectChannel, onNotify, onRefresh }: Props) {
   const [syncing, setSyncing] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [scopedIntel, setScopedIntel] = useState<VideoIntelligenceReport | null>(null);
 
-  const report = data.analytics.intelligence;
+  useEffect(() => {
+    if (activeChannelId === "all") {
+      setScopedIntel(null);
+      return;
+    }
+    let cancelled = false;
+    api
+      .get<{ ok: boolean; report: VideoIntelligenceReport }>(
+        `/api/analytics/intelligence?channelId=${encodeURIComponent(activeChannelId)}`,
+      )
+      .then(res => {
+        if (!cancelled && res.report) setScopedIntel(res.report);
+      })
+      .catch(() => {
+        if (!cancelled) setScopedIntel(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [activeChannelId, data.analytics.intelligence.generatedAt]);
+
+  const report = activeChannelId === "all" ? data.analytics.intelligence : scopedIntel ?? data.analytics.intelligence;
   const platformById = useMemo(() => {
     const map = new Map<string, PlatformDefinition>();
     for (const p of data.platforms) map.set(p.id, p);

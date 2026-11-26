@@ -27,23 +27,40 @@ test("HTTP server and MCP tools manage platforms, jobs, range media streaming, a
     const base = `http://127.0.0.1:${port}`;
 
     const ch = store.upsertChannel({ id: "studio-one", name: "Studio One" });
-    store.upsertConnection({ channelId: ch.id, platform: "youtube", handle: "@StudioOne" });
+    store.upsertConnection({
+      channelId: ch.id,
+      platform: "discord",
+      handle: "studio-one",
+      adapter: "webhook",
+      webhookUrl: "https://example.invalid/webhook",
+    });
     const fakeMp4 = join(dir, "clip.mp4");
     writeFileSync(fakeMp4, Buffer.from("0123456789abcdef"));
 
     const jobRes = store.enqueueJob({
       channelId: ch.id,
       title: "Sample Short",
-      platform: "youtube",
+      platform: "discord",
+      adapter: "webhook",
       targetDate: "2026-11-24",
       publishAt: "2026-11-24T10:00:00",
       videoPath: fakeMp4,
       videoBytes: 16,
     });
 
+    const healthHead = await fetch(`${base}/api/health`, { method: "HEAD" });
+    assert.equal(healthHead.status, 200);
+
     const health = await fetch(`${base}/api/health`).then(r => r.json() as Promise<{ ok: boolean; name: string }>);
     assert.equal(health.ok, true);
     assert.equal(health.name, "Vespera");
+
+    const badJson = await fetch(`${base}/api/scheduler`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{bad json",
+    });
+    assert.equal(badJson.status, 400);
 
     const rangeRes = await fetch(`${base}/api/media/video/${jobRes.job.id}`, {
       headers: { Range: "bytes=0-3" },
@@ -118,16 +135,18 @@ test("HTTP server and MCP tools manage platforms, jobs, range media streaming, a
     assert.equal(typeof lbStatus.available, "boolean");
 
     const schedBefore = await fetch(`${base}/api/scheduler`).then(
-      r => r.json() as Promise<{ ok: boolean; scheduler: { enabled: boolean } }>,
+      r => r.json() as Promise<{ ok: boolean; scheduler: { enabled: boolean; dueCount: number; overdueCount: number } }>,
     );
     assert.equal(schedBefore.scheduler.enabled, false);
+    assert.equal(schedBefore.scheduler.dueCount, 1);
+    assert.equal(schedBefore.scheduler.overdueCount, 1);
     const schedAfter = await fetch(`${base}/api/scheduler`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ enabled: true, runNow: true, dryRun: true }),
     }).then(r => r.json() as Promise<{ ok: boolean; scheduler: { enabled: boolean }; ran: number }>);
     assert.equal(schedAfter.scheduler.enabled, true);
-    assert.equal(typeof schedAfter.ran, "number");
+    assert.equal(schedAfter.ran, 1);
 
     const missingCheck = await fetch(`${base}/api/channels/${ch.id}/check`, {
       method: "POST",

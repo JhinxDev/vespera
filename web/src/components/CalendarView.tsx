@@ -48,6 +48,12 @@ export function CalendarView({ data, activeChannelId, onSelectChannel, onSelectJ
     return dates[0] ?? new Date().toISOString().slice(0, 10);
   }, [data.jobs]);
 
+  const todayIso = new Date().toLocaleDateString("en-CA");
+  const todayWeekOffset = useMemo(() => {
+    const diffDays = Math.floor((Date.parse(todayIso) - Date.parse(earliestDate)) / 86_400_000);
+    return Number.isFinite(diffDays) ? Math.max(0, Math.floor(diffDays / 7)) : 0;
+  }, [todayIso, earliestDate]);
+
   const [weekOffset, setWeekOffset] = useState(0);
   const weekStart = addDaysIso(earliestDate, weekOffset * 7);
   const weekDates = useMemo(() => Array.from({ length: 7 }, (_, i) => addDaysIso(weekStart, i)), [weekStart]);
@@ -192,6 +198,16 @@ export function CalendarView({ data, activeChannelId, onSelectChannel, onSelectJ
             </button>
           </div>
 
+          {weekOffset !== todayWeekOffset && (
+            <button
+              type="button"
+              onClick={() => setWeekOffset(todayWeekOffset)}
+              className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-2.5 py-1.5 text-xs font-medium text-[var(--accent-primary)] hover:bg-[var(--bg-hover)]"
+            >
+              Today
+            </button>
+          )}
+
           <div className="flex items-center rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)] p-0.5 text-xs">
             <button
               type="button"
@@ -220,13 +236,18 @@ export function CalendarView({ data, activeChannelId, onSelectChannel, onSelectJ
         {weekDates.map(date => {
           const { dow, label } = formatDayHeading(date);
           const count = (episodesByDate.get(date) ?? []).length;
+          const isToday = date === todayIso;
           return (
             <div
               key={date}
-              className="vsp-card flex items-center justify-between px-3.5 py-2.5 text-xs"
+              className={`vsp-card flex items-center justify-between px-3.5 py-2.5 text-xs ${
+                isToday ? "border-[var(--accent-primary)] bg-[var(--accent-soft)]" : ""
+              }`}
             >
               <div>
-                <div className="text-[10px] font-semibold uppercase tracking-wider text-[var(--text-muted)]">{dow}</div>
+                <div className={`text-[10px] font-semibold uppercase tracking-wider ${isToday ? "text-[var(--accent-primary)]" : "text-[var(--text-muted)]"}`}>
+                  {dow}{isToday ? " · TODAY" : ""}
+                </div>
                 <div className="font-semibold text-[var(--text-primary)] tabular-nums">{label}</div>
               </div>
               <span className="rounded-full bg-[var(--bg-elevated)] px-2 py-0.5 font-mono-num text-[11px] font-semibold text-[var(--text-secondary)]">
@@ -242,15 +263,20 @@ export function CalendarView({ data, activeChannelId, onSelectChannel, onSelectJ
           {weekDates.map(date => {
             const { dow, label } = formatDayHeading(date);
             const dayEpisodes = episodesByDate.get(date) ?? [];
+            const isToday = date === todayIso;
             return (
-              <section key={date} className="vsp-card flex flex-col p-4">
+              <section key={date} className={`vsp-card flex flex-col p-4 ${isToday ? "border-[var(--accent-primary)]/50" : ""}`}>
                 <div className="mb-3 flex items-center justify-between border-b border-[var(--border-subtle)] pb-2.5">
                   <div className="flex items-center gap-2">
-                    <span className="rounded-lg bg-[var(--accent-soft)] px-2 py-1 font-mono-num text-[11px] font-semibold uppercase text-[var(--accent-primary)]">
+                    <span className={`rounded-lg px-2 py-1 font-mono-num text-[11px] font-semibold uppercase ${
+                      isToday ? "bg-[var(--accent-primary)] text-white" : "bg-[var(--accent-soft)] text-[var(--accent-primary)]"
+                    }`}>
                       {dow}
                     </span>
                     <div>
-                      <h3 className="text-sm font-semibold text-[var(--text-primary)] tabular-nums">{label}</h3>
+                      <h3 className="text-sm font-semibold text-[var(--text-primary)] tabular-nums">
+                        {label}{isToday ? " · Today" : ""}
+                      </h3>
                     </div>
                   </div>
                   <button
@@ -306,17 +332,25 @@ export function CalendarView({ data, activeChannelId, onSelectChannel, onSelectJ
                         <div className="flex flex-wrap gap-1.5 border-t border-[var(--border-subtle)] pt-2">
                           {ep.jobs.map(job => {
                             const pDef = platformById.get(job.platform);
+                            const publishMs = Date.parse(job.publishAt);
+                            const isOverdue = job.status === "queued" && Number.isFinite(publishMs) && publishMs < Date.now() - 60_000;
                             return (
                               <button
                                 key={job.id}
                                 type="button"
                                 onClick={() => onSelectJob(job)}
-                                className="vsp-transition inline-flex items-center gap-1.5 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-2 py-1 text-[11px] hover:border-[var(--border-strong)] hover:bg-[var(--bg-hover)]"
-                                title={`Inspect ${pDef?.name ?? job.platform} job`}
+                                className={`vsp-transition inline-flex items-center gap-1.5 rounded-lg border bg-[var(--bg-surface)] px-2 py-1 text-[11px] hover:border-[var(--border-strong)] hover:bg-[var(--bg-hover)] ${
+                                  isOverdue ? "border-amber-500/45" : "border-[var(--border-subtle)]"
+                                }`}
+                                title={
+                                  isOverdue
+                                    ? `Overdue queued ${pDef?.name ?? job.platform} job (slot ${job.publishAt})`
+                                    : `Inspect ${pDef?.name ?? job.platform} job`
+                                }
                               >
                                 <PlatformIcon platformId={job.platform} platform={pDef} size="xs" />
                                 <span className={`rounded px-1.5 py-0.5 text-[9px] font-semibold uppercase border ${statusColorClasses(job.status)}`}>
-                                  {job.status.replace(/_/g, " ")}
+                                  {isOverdue ? "OVERDUE" : job.status.replace(/_/g, " ")}
                                 </span>
                               </button>
                             );
