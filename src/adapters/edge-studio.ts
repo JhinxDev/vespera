@@ -850,32 +850,34 @@ export class EdgeStudioAdapter implements PublishAdapter {
     return await withChannelProfileLock(channel.profileDir, async () => {
       const results: SessionCheckResult[] = [];
       const requestedHeadless = options.headless ?? true;
-      let ctx = await launchChannelEdge(channel.profileDir, requestedHeadless);
-      const emptyShellPlatforms: ChannelConnection[] = [];
+      const canRunOnLinuxDisplay =
+        process.platform !== "linux" || Boolean(process.env.DISPLAY) || existsSync("/usr/bin/Xvfb");
+      const youtubeTargets = targets.filter(c => c.platform === "youtube");
+      const otherTargets = targets.filter(c => c.platform !== "youtube");
 
-      try {
-        const page = ctx.pages()[0] ?? await ctx.newPage();
-        for (const conn of targets) {
-          const { loginUrl } = this.resolveConnectionUrls(conn);
-          const res = await inspectPlatformPage(page, conn.platform, conn.handle, loginUrl, this.evidenceDir, channel.id);
-          // YouTube Studio frequently renders an empty SPA shell in headless mode; recheck visibly when a display exists.
-          const canLaunchVisible = process.platform !== "linux" || Boolean(process.env.DISPLAY);
-          if (requestedHeadless && canLaunchVisible && conn.platform === "youtube" && !res.note && !res.observedHandle) {
-            emptyShellPlatforms.push(conn);
-          } else {
-            results.push(res);
-          }
-        }
-      } finally {
-        await ctx.close();
-        clearProfileSessionRestore(channel.profileDir);
-      }
-
-      if (emptyShellPlatforms.length > 0) {
-        ctx = await launchChannelEdge(channel.profileDir, false);
+      if (otherTargets.length > 0) {
+        const ctx = await launchChannelEdge(channel.profileDir, requestedHeadless);
         try {
           const page = ctx.pages()[0] ?? await ctx.newPage();
-          for (const conn of emptyShellPlatforms) {
+          for (const conn of otherTargets) {
+            const { loginUrl } = this.resolveConnectionUrls(conn);
+            const res = await inspectPlatformPage(page, conn.platform, conn.handle, loginUrl, this.evidenceDir, channel.id);
+            results.push(res);
+          }
+        } finally {
+          await ctx.close();
+          clearProfileSessionRestore(channel.profileDir);
+        }
+      }
+
+      if (youtubeTargets.length > 0) {
+        // Always check YouTube with the full Chromium + Xvfb runtime when available so its
+        // browser binary and user-agent match Live Browser and runYouTubeUpload identically.
+        const ytHeadless = options.headless === false ? false : canRunOnLinuxDisplay ? false : requestedHeadless;
+        const ctx = await launchChannelEdge(channel.profileDir, ytHeadless);
+        try {
+          const page = ctx.pages()[0] ?? await ctx.newPage();
+          for (const conn of youtubeTargets) {
             const { loginUrl } = this.resolveConnectionUrls(conn);
             const res = await inspectPlatformPage(page, conn.platform, conn.handle, loginUrl, this.evidenceDir, channel.id);
             results.push(res);

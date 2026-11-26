@@ -198,6 +198,22 @@ test("listRunnableJobs dispatches just-in-time across all platforms, recovers ru
     applyPostPublishAutomations(store, { ...ttJob, status: "published" });
     assert.equal(store.listFollowUpComments().length, 1);
     assert.equal(store.listPlugs().find(p => p.id === plug.id)?.runsCount, 1);
+
+    // Verified signed_in check automatically re-queues needs_login jobs for that channel+platform only
+    const ytJob = dueNow.find(j => j.platform === "youtube")!;
+    const igJob = dueNow.find(j => j.platform === "instagram")!;
+    store.updateJob(ytJob.id, { status: "needs_login", lastError: "Redirected to sign-in" });
+    store.updateJob(igJob.id, { status: "needs_login", lastError: "Instagram login wall" });
+    store.saveSessionCheck({
+      channelId: "creator-a",
+      platform: "youtube",
+      status: "signed_in",
+      expectedHandle: "@creator_youtube",
+      checkedAt: new Date().toISOString(),
+    });
+    assert.equal(store.getJob(ytJob.id)?.status, "queued");
+    assert.equal(store.getJob(ytJob.id)?.lastError, undefined);
+    assert.equal(store.getJob(igJob.id)?.status, "needs_login");
   } finally {
     store.close();
     rmSync(dir, { recursive: true, force: true });

@@ -745,6 +745,17 @@ export class VesperaStore {
     return Number(res.changes ?? 0) > 0;
   }
 
+  requeueNeedsLoginJobs(channelId: string, platform: string): number {
+    const now = new Date().toISOString();
+    const res = this.db
+      .prepare(`
+        UPDATE jobs SET status = 'queued', last_error = NULL, updated_at = ?
+        WHERE channel_id = ? AND platform = ? AND status = 'needs_login'
+      `)
+      .run(now, channelId, platform);
+    return Number(res.changes ?? 0);
+  }
+
   saveSessionCheck(result: SessionCheckResult): void {
     const now = new Date().toISOString();
     this.db.prepare(`
@@ -766,6 +777,12 @@ export class VesperaStore {
       result.channelId,
       result.platform,
     );
+    if (result.status === "signed_in") {
+      const requeued = this.requeueNeedsLoginJobs(result.channelId, result.platform);
+      if (requeued > 0) {
+        console.log(`[auth] Re-queued ${requeued} needs_login job(s) for ${result.channelId}/${result.platform}`);
+      }
+    }
   }
 
   // ---------------- Jobs & Attempts ----------------
