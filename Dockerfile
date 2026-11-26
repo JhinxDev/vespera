@@ -26,11 +26,18 @@ COPY web ./web
 COPY scripts ./scripts
 RUN npm run build:server && npm run build:web
 
+ARG VESPERA_REVISION=unknown
+LABEL org.opencontainers.image.source="https://github.com/JhinxDev/vespera"
+LABEL org.opencontainers.image.description="Self-hosted social media publishing workbench, direct video uploader, and AI/MCP creator studio"
+LABEL org.opencontainers.image.licenses="MIT"
+LABEL org.opencontainers.image.revision="${VESPERA_REVISION}"
+
 ENV NODE_ENV=production
 ENV VESPERA_DOCKER=1
 ENV VESPERA_HOST=0.0.0.0
 ENV VESPERA_PORT=4660
 ENV VESPERA_DATA_DIR=/data
+ENV VESPERA_REVISION="${VESPERA_REVISION}"
 
 VOLUME ["/data"]
 EXPOSE 4660

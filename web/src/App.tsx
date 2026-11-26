@@ -485,7 +485,7 @@ export function App() {
                 <span className="h-2 w-2 rounded-full bg-emerald-400" />
                 {data?.mode === "docker" ? "Docker Node" : "Local Node"}
               </span>
-              <span className="font-mono-num">v{data?.version ?? "1.0.0"}</span>
+              <span className="font-mono-num">v{data?.version ?? "1.1.0"}</span>
             </div>
           )}
         </div>
