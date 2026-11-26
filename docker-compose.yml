@@ -1,6 +1,8 @@
 services:
   vespera:
-    build: .
+    image: ghcr.io/jhinxdev/vespera:latest
+    # To build locally from source instead of pulling GHCR, comment out `image:` and uncomment `build: .`.
+    # build: .
     container_name: vespera
     restart: unless-stopped
     shm_size: "1gb"

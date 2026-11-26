@@ -5,6 +5,8 @@
 # Vespera
 
 [![CI](https://github.com/JhinxDev/vespera/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/JhinxDev/vespera/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/JhinxDev/vespera)](https://github.com/JhinxDev/vespera/releases/latest)
+[![Container](https://img.shields.io/badge/ghcr.io-jhinxdev%2Fvespera-2496ED?logo=docker&logoColor=white)](https://github.com/JhinxDev/vespera/pkgs/container/vespera)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Node.js >=24](https://img.shields.io/badge/Node.js-%3E%3D24.0.0-339933.svg)](https://nodejs.org/)
 
@@ -25,13 +27,17 @@ Built with Node.js 24 (`node:sqlite`), Playwright Chromium/Edge contexts, React 
 
 ## Quick Start (Docker)
 
+Pull and run the prebuilt GHCR image (`ghcr.io/jhinxdev/vespera:latest`):
+
 ```bash
 git clone https://github.com/JhinxDev/vespera.git
 cd vespera
 cp .env.example .env
 cp channels.example.json channels.local.json
-docker compose up -d --build
+docker compose up -d
 ```
+
+To build from local source instead, run `docker compose build && docker compose up -d` (after uncommenting `build: .` in `docker-compose.yml`).
 
 Open `http://127.0.0.1:4660` (data persists in the `vespera_data` `/data` volume).
 

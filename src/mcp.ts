@@ -4,6 +4,7 @@ import { buildVideoIntelligence } from "./analytics/intelligence.js";
 import type { VesperaStore } from "./db.js";
 import type { JobStatus } from "./types.js";
 import type { PublishWorker } from "./worker.js";
+import { VESPERA_VERSION } from "./version.js";
 
 interface JsonRpcRequest {
   jsonrpc: "2.0";
@@ -121,7 +122,7 @@ export async function handleMcpRequest(
     return reply({
       protocolVersion: "2024-11-05",
       capabilities: { tools: {} },
-      serverInfo: { name: "vespera", version: "1.0.0" },
+      serverInfo: { name: "vespera", version: VESPERA_VERSION },
     });
   }
   if (req.method === "tools/list") {

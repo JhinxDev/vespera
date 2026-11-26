@@ -23,6 +23,7 @@ import {
 import { LiveBrowserManager } from "./live-browser.js";
 import type { AdapterKind, ExistingReceipt, JobStatus, PublishingManifest, SessionCheckResult } from "./types.js";
 import type { PublishWorker } from "./worker.js";
+import { VESPERA_VERSION } from "./version.js";
 
 const MIME_MAP: Record<string, string> = {
   ".html": "text/html; charset=utf-8",
@@ -341,7 +342,7 @@ export function createVesperaServer(deps: ServerDependencies): Server {
         const body = JSON.stringify({
           ok: true,
           name: "Vespera",
-          version: "1.0.0",
+          version: VESPERA_VERSION,
           mode: runtimeMode,
           oauth: getOAuthProviderStatus(),
           liveBrowser: {
@@ -363,7 +364,7 @@ export function createVesperaServer(deps: ServerDependencies): Server {
         sendJson(res, 200, {
           ok: true,
           name: "Vespera",
-          version: "1.0.0",
+          version: VESPERA_VERSION,
           mode: runtimeMode,
           oauth: getOAuthProviderStatus(),
           liveBrowser: {
