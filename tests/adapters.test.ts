@@ -11,6 +11,7 @@ import {
   formatMonthDayYear,
   formatTime12h,
   isVerticalCropPreserved,
+  normalizeYouTubeDescriptionForChapters,
   truncateAtWordBoundary,
   verifyExpectedHandle,
 } from "../src/adapters/edge-studio.js";
@@ -151,4 +152,38 @@ test("clearProfileSessionRestore removes stale Edge tab-restore files while pres
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("normalizeYouTubeDescriptionForChapters places valid chapters before links and validates constraints", () => {
+  const withLinksFirst = [
+    "Intro text.",
+    "",
+    "Links\nDocs: https://omakase-plus.jhinx.dev\nRepo: https://github.com/JhinxDev/omakase-plus",
+    "",
+    "Chapters\n0:00\u00a0Why I built it\n0:20 Overview\n1:14 Architecture",
+    "",
+    "Outro text.",
+  ].join("\n");
+
+  const fixed = normalizeYouTubeDescriptionForChapters(withLinksFirst);
+  assert.equal(fixed.reordered, true);
+  assert.equal(fixed.chapterCount, 3);
+  assert.deepEqual(fixed.warnings, []);
+  assert.ok(fixed.text.indexOf("0:00 Why I built it") < fixed.text.indexOf("https://omakase-plus.jhinx.dev"));
+
+  const alreadyGood = normalizeYouTubeDescriptionForChapters(fixed.text);
+  assert.equal(alreadyGood.reordered, false);
+  assert.equal(alreadyGood.chapterCount, 3);
+  assert.deepEqual(alreadyGood.warnings, []);
+
+  const tooShortGap = normalizeYouTubeDescriptionForChapters(
+    "Chapters\n0:00 Intro\n0:06 Too fast\n1:00 End",
+  );
+  assert.equal(tooShortGap.warnings.length, 1);
+  assert.match(tooShortGap.warnings[0], /10 seconds/i);
+
+  const missingZero = normalizeYouTubeDescriptionForChapters(
+    "Chapters\n0:15 Start late\n1:00 Middle\n2:00 End",
+  );
+  assert.match(missingZero.warnings[0], /0:00/);
 });

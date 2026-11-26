@@ -27,6 +27,104 @@ function escapeRegExp(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
+function parseYouTubeTimestampSeconds(ts: string): number | null {
+  const parts = ts.split(":").map(Number);
+  if (parts.some(n => !Number.isInteger(n) || n < 0)) return null;
+  if (parts.length === 2) {
+    const [m, s] = parts;
+    return s < 60 ? m * 60 + s : null;
+  }
+  if (parts.length === 3) {
+    const [h, m, s] = parts;
+    return m < 60 && s < 60 ? h * 3600 + m * 60 + s : null;
+  }
+  return null;
+}
+
+export function normalizeYouTubeDescriptionForChapters(description: string): {
+  text: string;
+  chapterCount: number;
+  reordered: boolean;
+  warnings: string[];
+} {
+  const cleanText = description.replace(/\r\n?/g, "\n").replace(/[\u00a0\u200b\ufeff]/g, " ");
+  const paragraphs = cleanText.trim().split(/\n{2,}/);
+  const tsLineRx = /^((?:\d{1,2}:)?\d{1,2}:\d{2})\s+(.+)$/;
+  const headingRx = /^(?:chapters|timestamps):?$/i;
+
+  let blockStart = -1;
+  let blockEnd = -1;
+  let timestamps: Array<{ seconds: number; cleanLine: string }> = [];
+
+  for (let i = 0; i < paragraphs.length; i++) {
+    const rawLines = paragraphs[i].split("\n").map(l => l.trim()).filter(Boolean);
+    if (rawLines.length === 0) continue;
+    const hasHeading = rawLines.length > 1 && headingRx.test(rawLines[0]);
+    const bodyLines = hasHeading ? rawLines.slice(1) : rawLines;
+    const parsed: Array<{ seconds: number; cleanLine: string }> = [];
+    let allMatch = bodyLines.length > 0;
+    for (const line of bodyLines) {
+      const m = tsLineRx.exec(line);
+      const sec = m ? parseYouTubeTimestampSeconds(m[1]) : null;
+      if (!m || sec === null) {
+        allMatch = false;
+        break;
+      }
+      parsed.push({ seconds: sec, cleanLine: `${m[1]} ${m[2].trim()}` });
+    }
+    if (allMatch) {
+      blockStart = !hasHeading && i > 0 && headingRx.test(paragraphs[i - 1].trim()) ? i - 1 : i;
+      blockEnd = i;
+      timestamps = parsed;
+      paragraphs[i] = hasHeading
+        ? [rawLines[0], ...parsed.map(p => p.cleanLine)].join("\n")
+        : parsed.map(p => p.cleanLine).join("\n");
+      break;
+    }
+  }
+
+  if (timestamps.length === 0) {
+    return { text: cleanText.trim(), chapterCount: 0, reordered: false, warnings: [] };
+  }
+
+  const warnings: string[] = [];
+  if (timestamps.length < 3) {
+    warnings.push(`YouTube chapters require at least 3 timestamps (found ${timestamps.length}).`);
+  }
+  if (timestamps[0].seconds !== 0) {
+    warnings.push("YouTube chapters must start at 0:00.");
+  }
+  for (let k = 1; k < timestamps.length; k++) {
+    if (timestamps[k].seconds <= timestamps[k - 1].seconds) {
+      warnings.push("YouTube chapter timestamps must be strictly ascending.");
+      break;
+    }
+    if (timestamps[k].seconds - timestamps[k - 1].seconds < 10) {
+      warnings.push("Each YouTube chapter must be at least 10 seconds long.");
+      break;
+    }
+  }
+
+  let reordered = false;
+  if (warnings.length === 0) {
+    const firstUrlIdx = paragraphs.findIndex((p, idx) => idx < blockStart && /https?:\/\//i.test(p));
+    if (firstUrlIdx !== -1) {
+      const chapterSlice = paragraphs.slice(blockStart, blockEnd + 1);
+      const remaining = [...paragraphs.slice(0, blockStart), ...paragraphs.slice(blockEnd + 1)];
+      remaining.splice(firstUrlIdx, 0, ...chapterSlice);
+      paragraphs.splice(0, paragraphs.length, ...remaining);
+      reordered = true;
+    }
+  }
+
+  return {
+    text: paragraphs.join("\n\n"),
+    chapterCount: timestamps.length,
+    reordered,
+    warnings,
+  };
+}
+
 export function verifyExpectedHandle(
   observed: string | undefined,
   expected: string,
@@ -938,12 +1036,19 @@ export class EdgeStudioAdapter implements PublishAdapter {
     await page.keyboard.press("Control+A");
     await page.keyboard.insertText((job.payload.title ?? job.title).slice(0, 100));
 
+    const appliedExtras: string[] = [];
     const descBox = page.locator("#textbox").nth(1);
-    const descCopy = job.payload.description ?? this.buildPostCopy(job);
-    if (descCopy && await descBox.isVisible().catch(() => false)) {
+    const rawDescCopy = job.payload.description ?? this.buildPostCopy(job);
+    const chapterMeta = rawDescCopy
+      ? normalizeYouTubeDescriptionForChapters(rawDescCopy)
+      : { text: "", chapterCount: 0, reordered: false, warnings: [] };
+    if (chapterMeta.chapterCount >= 3 && chapterMeta.warnings.length === 0) {
+      appliedExtras.push(`chapters(${chapterMeta.chapterCount})`);
+    }
+    if (chapterMeta.text && await descBox.isVisible().catch(() => false)) {
       await descBox.click();
       await page.keyboard.press("Control+A");
-      await page.keyboard.insertText(descCopy.slice(0, 5000));
+      await page.keyboard.insertText(chapterMeta.text.slice(0, 5000));
     }
 
     const thumbPath = job.payload.thumbnailPath ?? job.coverPath;
@@ -963,7 +1068,6 @@ export class EdgeStudioAdapter implements PublishAdapter {
       await kidsRadio.click();
     }
 
-    const appliedExtras: string[] = [];
     const needsShowMore = Boolean(
       job.payload.aiDisclosure ||
       job.payload.tags?.length ||
@@ -979,7 +1083,9 @@ export class EdgeStudioAdapter implements PublishAdapter {
       }
 
       if (job.payload.aiDisclosure) {
-        const alteredYes = page.locator('tp-yt-paper-radio-button[name="HAS_ALTERED_CONTENT_YES"]');
+        const alteredYes = page
+          .locator('tp-yt-paper-radio-button[name="VIDEO_HAS_ALTERED_CONTENT_YES"], tp-yt-paper-radio-button[name="HAS_ALTERED_CONTENT_YES"]')
+          .first();
         if (await alteredYes.isVisible().catch(() => false)) {
           await alteredYes.scrollIntoViewIfNeeded().catch(() => {});
           await alteredYes.click();
@@ -1164,6 +1270,23 @@ export class EdgeStudioAdapter implements PublishAdapter {
         remoteId = shareLink.split("/").pop()?.split("?")[0];
       }
     }
+    if (remoteId && shouldPublishNow && chapterMeta.chapterCount >= 3 && chapterMeta.warnings.length === 0) {
+      try {
+        const res = await fetch(`https://www.youtube.com/watch?v=${encodeURIComponent(remoteId)}`, {
+          headers: { "Accept-Language": "en-US,en;q=0.9" },
+          signal: AbortSignal.timeout(8000),
+        });
+        if (res.ok) {
+          const watchHtml = await res.text();
+          if (watchHtml.includes("macroMarkersListItemRenderer") || watchHtml.includes("chapterRenderer")) {
+            appliedExtras.push("chapters-verified");
+          }
+        }
+      } catch {
+        // Non-fatal; chapter indexing can lag a few seconds right after publish.
+      }
+    }
+
     const summaryParts = [...appliedExtras, ...(captionsNote ? [captionsNote] : [])];
     const summarySuffix = summaryParts.length > 0 ? ` [${summaryParts.join(", ")}]` : "";
     const shot = await this.saveShot(page, `${channel.id}-youtube-done`);
